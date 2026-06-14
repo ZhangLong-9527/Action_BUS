@@ -1,0 +1,17 @@
+# STM32 编译产物
+Stm32Project/ActionBus/build/
+Stm32Project/ActionBus/compile_commands.json
+
+# CubeMX 临时文件
+Stm32Project/ActionBus/MXTmpFiles/
+
+# 调试辅助脚本（一次性使用）
+Stm32Project/ActionBus/setup_gdb.sh
+
+# VSCode 本地配置
+.vscode/settings.json
+.vscode/extensions.json
+
+# 系统文件
+.DS_Store
+Thumbs.db

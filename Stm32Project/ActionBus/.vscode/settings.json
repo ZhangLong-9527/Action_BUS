@@ -1,0 +1,7 @@
+{
+    "clangd.arguments": [
+        "--query-driver=/usr/bin/arm-none-eabi-gcc,/usr/bin/arm-none-eabi-g++",
+        "--compile-commands-dir=${workspaceFolder}"
+    ],
+    "C_Cpp.intelliSenseEngine": "disabled"
+}
