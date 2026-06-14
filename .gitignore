@@ -1,17 +1,26 @@
-# STM32 编译产物
+# ── Node.js ──────────────────────────────
+ActionBus_Upper/node_modules/
+
+# ── STM32 编译产物 ───────────────────────
 Stm32Project/ActionBus/build/
 Stm32Project/ActionBus/compile_commands.json
-
-# CubeMX 临时文件
-Stm32Project/ActionBus/MXTmpFiles/
-
-# 调试辅助脚本（一次性使用）
 Stm32Project/ActionBus/setup_gdb.sh
 
-# VSCode 本地配置
+# ── CubeMX 生成 / 缓存 ──────────────────
+Stm32Project/ActionBus/MXTmpFiles/
+Stm32Project/ActionBus/.cache/
+Stm32Project/ActionBus/.mxproject
+
+# ── Python ───────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── IDE / 编辑器 ─────────────────────────
 .vscode/settings.json
 .vscode/extensions.json
+.idea/
 
-# 系统文件
+# ── 系统文件 ─────────────────────────────
 .DS_Store
 Thumbs.db

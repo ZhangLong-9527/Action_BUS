@@ -2,28 +2,20 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @brief          : ActionBus v3.1 测试固件入口
   ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "stm32f4xx_hal_conf.h"
 #include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "actionbus.h"
+#include "test_tasks.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,13 +36,13 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+static uint8_t g_rx_byte;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
+static void AB_SendBytes(const uint8_t *data, uint16_t len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -89,10 +81,19 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_9, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_10, GPIO_PIN_SET);
 
+  HAL_UART_Transmit(&huart1, (uint8_t *)"ActionBus v3.1\r\n", sizeof("ActionBus v3.1\r\n")-1, 1000);
+  HAL_UART_Transmit(&huart1, (uint8_t *)"test message\r\n", sizeof("test message\r\n")-1, 1000);
+  AB_SendBytes((uint8_t *)"test message\r\n", sizeof("test message\r\n"));
+  /* --- ActionBus 初始化 --- */
+  ActionBus_Init();
+  ActionBus_SetSendCallback(AB_SendBytes);
 
+  /* --- 注册全部测试任务 --- */
+  TestTasks_Init();
+
+  /* --- 启动 UART 中断接收（单字节模式） --- */
+  HAL_UART_Receive_IT(&huart1, &g_rx_byte, 1);
 
   /* USER CODE END 2 */
 
@@ -103,13 +104,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);
-    HAL_Delay(500);
-    HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_10);
-    HAL_Delay(500);
-    HAL_UART_Transmit(&huart1, (uint8_t *)"Hello, World!\r\n", 15, 1000);
+    ActionBus_ProcessPending();
+    TestTasks_Loop();
+    /* USER CODE END 3 */
   }
-  /* USER CODE END 3 */
 }
 
 /**
@@ -158,6 +156,21 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+/* ActionBus 底层发送回调 */
+static void AB_SendBytes(const uint8_t *data, uint16_t len)
+{
+    HAL_UART_Transmit(&huart1, (uint8_t *)data, len, 1000);
+}
+
+/* UART 接收完成回调：将字节喂入 ActionBus 解析器并重新挂起中断 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1) {
+        ActionBus_RxHandler(g_rx_byte);
+        HAL_UART_Receive_IT(&huart1, &g_rx_byte, 1);
+    }
+}
 
 /* USER CODE END 4 */
 

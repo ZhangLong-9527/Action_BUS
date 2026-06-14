@@ -1,0 +1,12 @@
+{
+  "name": "actionbus-master",
+  "version": "3.1.0",
+  "description": "ActionBus Master 上位机",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron --no-sandbox ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

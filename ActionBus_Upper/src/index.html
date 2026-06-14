@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ActionBus Master v3.1</title>
+    <link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+
+<!-- ========== TITLEBAR ========== -->
+<div id="titlebar">
+    <!-- Logo & Title -->
+    <div class="titlebar-logo">
+        <img src="../UI/logo.png" alt="logo">
+        <span class="titlebar-title">ActionBus Master v3.1</span>
+    </div>
+
+    <div class="titlebar-sep"></div>
+
+    <!-- Target Address -->
+    <div class="conn-group">
+        <span class="conn-label">Target</span>
+        <input class="conn-input addr" id="target-addr" value="0x01" spellcheck="false">
+    </div>
+
+    <div class="titlebar-sep"></div>
+
+    <!-- Port -->
+    <div class="conn-group">
+        <span class="conn-label">Port</span>
+        <select class="conn-input port" id="port-select">
+            <option>COM3</option>
+            <option>/dev/ttyUSB0</option>
+            <option>/dev/ttyUSB1</option>
+        </select>
+    </div>
+
+    <!-- Baud -->
+    <div class="conn-group">
+        <span class="conn-label">Baud</span>
+        <select class="conn-input baud" id="baud-select">
+            <option>1200</option>
+            <option>2400</option>
+            <option>4800</option>
+            <option>9600</option>
+            <option>19200</option>
+            <option>38400</option>
+            <option>57600</option>
+            <option selected>115200</option>
+            <option>230400</option>
+            <option>460800</option>
+            <option>921600</option>
+            <option>1000000</option>
+            <option>2000000</option>
+            <option>4000000</option>
+            <option value="custom">自定义...</option>
+        </select>
+    </div>
+
+    <div class="titlebar-sep"></div>
+
+    <!-- Status -->
+    <div class="conn-group">
+        <span class="status-dot" id="status-dot"></span>
+        <span class="status-text" id="status-text">DISCONNECTED</span>
+    </div>
+
+    <!-- Connect / Disconnect -->
+    <button class="tb-btn primary" id="btn-connect">Connect</button>
+
+    <div class="titlebar-sep"></div>
+
+    <!-- Scan & Actions -->
+    <button class="tb-btn" id="btn-scan">⟳ One Click Scan</button>
+    <button class="tb-btn" id="btn-import-script">↑ Import Script</button>
+    <button class="tb-btn" id="btn-export-csv">↓ Export CSV</button>
+    <button class="tb-btn icon-btn" id="btn-settings" title="设置">⚙</button>
+
+    <div class="titlebar-spacer"></div>
+
+    <!-- Window controls -->
+    <div class="win-controls">
+        <button class="win-btn" id="btn-min" title="最小化">─</button>
+        <button class="win-btn" id="btn-max" title="最大化">□</button>
+        <button class="win-btn close" id="btn-close" title="关闭">✕</button>
+    </div>
+</div>
+
+<!-- ========== MAIN LAYOUT ========== -->
+<div id="main-layout">
+
+    <!-- ===== LEFT PANEL ===== -->
+    <div id="left-panel">
+        <!-- Tabs -->
+        <div class="panel-tabs">
+            <button class="panel-tab active" data-tab="devices">设备列表</button>
+            <button class="panel-tab" data-tab="widgets">控件库</button>
+            <button id="btn-collapse-left" class="panel-collapse-btn" title="收起侧边栏">◀</button>
+        </div>
+
+        <!-- Devices Tab -->
+        <div class="tab-content active" id="tab-devices">
+            <div id="devices-tab">
+                <div class="device-tree-header">
+                    <span class="device-tree-title">当前总线设备</span>
+                    <button class="tb-btn" style="height:20px;font-size:10px;padding:0 6px;" id="btn-refresh-devices">刷新</button>
+                </div>
+
+                <!-- Device Node: 0x01 -->
+                <div class="device-node expanded">
+                    <div class="device-node-header">
+                        <span class="device-chevron">▶</span>
+                        <span class="device-addr">0x01</span>
+                        <div class="device-info">
+                            <div class="device-name">SensorNode_A</div>
+                            <div class="device-ver">v3.0 · ActionBus</div>
+                        </div>
+                        <span class="device-status"></span>
+                    </div>
+                    <div class="device-actions">
+                        <div class="action-item">
+                            <span class="action-code">0x0B</span>
+                            <span class="action-name">Temperature Read</span>
+                            <button class="action-add-btn" title="添加到画布">+</button>
+                        </div>
+                        <div class="action-item">
+                            <span class="action-code">0x02</span>
+                            <span class="action-name">History Read</span>
+                            <button class="action-add-btn" title="添加到画布">+</button>
+                        </div>
+                        <div class="action-item">
+                            <span class="action-code">0x10</span>
+                            <span class="action-name">Firmware Update (File Transfer)</span>
+                            <button class="action-add-btn" title="添加到画布">+</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Device Node: 0x05 -->
+                <div class="device-node">
+                    <div class="device-node-header">
+                        <span class="device-chevron">▶</span>
+                        <span class="device-addr">0x05</span>
+                        <div class="device-info">
+                            <div class="device-name">MotorController_B</div>
+                            <div class="device-ver">v3.0 · ActionBus</div>
+                        </div>
+                        <span class="device-status"></span>
+                    </div>
+                    <div class="device-actions">
+                        <div class="action-item">
+                            <span class="action-code">0x0A</span>
+                            <span class="action-name">Motor Speed Control</span>
+                            <button class="action-add-btn" title="添加到画布">+</button>
+                        </div>
+                        <div class="action-item">
+                            <span class="action-code">0x0C</span>
+                            <span class="action-name">IMU Attitude</span>
+                            <button class="action-add-btn" title="添加到画布">+</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Widgets Tab -->
+        <div class="tab-content" id="tab-widgets">
+            <div id="widgets-tab">
+                <div class="widgets-section-title">数据显示</div>
+                <div class="widgets-grid">
+                    <div class="widget-card" draggable="true" data-type="waveform">
+                        <span class="widget-card-icon">📈</span>
+                        <span class="widget-card-name">波形图</span>
+                    </div>
+                    <div class="widget-card" draggable="true" data-type="attitude">
+                        <span class="widget-card-icon">🎲</span>
+                        <span class="widget-card-name">3D 姿态</span>
+                    </div>
+                    <div class="widget-card" draggable="true" data-type="gauge">
+                        <span class="widget-card-icon">🕹️</span>
+                        <span class="widget-card-name">仪表盘</span>
+                    </div>
+                    <div class="widget-card" draggable="true" data-type="number">
+                        <span class="widget-card-icon" style="font-size:18px;font-weight:700;color:#3b82f6;">15</span>
+                        <span class="widget-card-name">数字显示</span>
+                    </div>
+                    <div class="widget-card" draggable="true" data-type="progressbar">
+                        <span class="widget-card-icon">▬</span>
+                        <span class="widget-card-name">进度条</span>
+                    </div>
+                    <div class="widget-card" draggable="true" data-type="xy">
+                        <span class="widget-card-icon">⊹</span>
+                        <span class="widget-card-name">XY 散点图</span>
+                    </div>
+                </div>
+
+                <div class="widgets-section-title">交互控件</div>
+                <div class="widgets-grid">
+                    <div class="widget-card" draggable="true" data-type="switch">
+                        <span class="widget-card-icon">🔘</span>
+                        <span class="widget-card-name">开关按键</span>
+                    </div>
+                    <div class="widget-card" draggable="true" data-type="slider">
+                        <span class="widget-card-icon">⇔</span>
+                        <span class="widget-card-name">滑块</span>
+                    </div>
+                    <div class="widget-card" draggable="true" data-type="text">
+                        <span class="widget-card-icon">T</span>
+                        <span class="widget-card-name">文本标签</span>
+                    </div>
+                    <div class="widget-card" draggable="true" data-type="statuslight">
+                        <span class="widget-card-icon">🔴</span>
+                        <span class="widget-card-name">状态灯</span>
+                    </div>
+                </div>
+
+                <div class="widgets-section-title">脚本</div>
+                <div class="widgets-grid" style="grid-template-columns:1fr;">
+                    <div class="widget-card" draggable="true" data-type="script" style="flex-direction:row;justify-content:flex-start;gap:10px;padding:8px 12px;">
+                        <span class="widget-card-icon">{ }</span>
+                        <div>
+                            <div style="font-size:11px;font-weight:500;color:var(--text-primary);">JS 脚本解码器</div>
+                            <div class="widget-card-name">绑定帧解码逻辑</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Left panel resize separator -->
+    <div id="left-sep"></div>
+
+    <!-- ===== CENTER AREA ===== -->
+    <div id="center-area">
+        <!-- Canvas Toolbar -->
+        <div id="canvas-toolbar">
+            <button id="btn-expand-left" class="canvas-btn expand-left-btn" style="display:none" title="展开侧边栏">▶</button>
+            <span class="canvas-title">ActionCanvas</span>
+            <button class="canvas-btn" id="btn-clear-canvas">清空画布</button>
+            <button class="canvas-btn" id="btn-save-layout">保存布局</button>
+            <button class="canvas-btn" id="btn-load-layout">加载布局</button>
+            <div class="canvas-toolbar-sep"></div>
+            <button class="canvas-btn" id="btn-grid-snap">网格吸附 ✓</button>
+        </div>
+
+        <!-- Canvas -->
+        <div id="action-canvas">
+            <div class="canvas-empty-hint" id="canvas-hint">
+                <span class="hint-icon">⊞</span>
+                <span class="hint-text">从左侧控件库拖入控件，或点击设备 Action 右侧的 + 按钮</span>
+            </div>
+        </div>
+
+        <!-- Bottom resize handle -->
+        <div id="bottom-resize-handle"></div>
+
+        <!-- Bottom Panel -->
+        <div id="bottom-panel">
+            <!-- Frame Log -->
+            <div class="log-pane" id="frame-log-pane">
+                <div class="log-header">
+                    <span class="log-header-title">Frame Log（原始帧）</span>
+                    <button class="log-btn active" id="btn-scroll-lock-frame">自动滚动</button>
+                    <button class="log-btn" id="btn-clear-frame">清空</button>
+                </div>
+                <div class="log-body" id="frame-log-body"></div>
+            </div>
+
+            <!-- Decoded Log -->
+            <div class="log-pane" id="decoded-log-pane">
+                <div class="log-header">
+                    <span class="log-header-title">Decoded Log（解码日志）</span>
+                    <button class="log-btn active" id="btn-scroll-lock-decoded">自动滚动</button>
+                    <button class="log-btn" id="btn-clear-decoded">清空</button>
+                </div>
+                <div class="log-body" id="decoded-log-body"></div>
+            </div>
+        </div>
+
+        <!-- Manual Send Bar -->
+        <div id="send-bar">
+            <div class="send-toggle-group">
+                <div class="send-sw" id="toggle-assemble">
+                    <div class="send-sw-knob"></div>
+                </div>
+                <span class="send-sw-label" id="send-sw-label">组帧</span>
+            </div>
+            <div class="send-bar-sep"></div>
+
+            <!-- 组帧模式 -->
+            <div id="send-assemble-fields" class="send-fields">
+                <span class="send-label">Func</span>
+                <input id="send-func" class="send-input send-func-w" placeholder="0x0B" spellcheck="false">
+                <span class="send-label">Data</span>
+                <input id="send-data" class="send-input send-data-flex" placeholder="01 2C 00 00  (hex, 空格分隔)" spellcheck="false">
+            </div>
+
+            <!-- 原始模式 -->
+            <div id="send-raw-fields" class="send-fields" style="display:none">
+                <span class="send-label">Raw</span>
+                <input id="send-raw" class="send-input send-data-flex" placeholder="AA 55 01 0B 11 02 01 2C  (hex)" spellcheck="false">
+            </div>
+
+            <button id="btn-manual-send" class="send-btn">↑ 发送</button>
+        </div>
+    </div>
+
+</div><!-- end #main-layout -->
+
+<!-- ========== SETTINGS PANEL ========== -->
+<div id="settings-panel" class="settings-panel hidden">
+    <div class="settings-section-title">显示设置</div>
+
+    <div class="settings-row-label">主题</div>
+    <div class="theme-list" id="theme-list">
+        <div class="theme-item" data-theme="dark-blue">
+            <div class="theme-preview">
+                <div class="tp-bg"  style="background:#0d1117;"></div>
+                <div class="tp-panel" style="background:#161b22;"></div>
+                <div class="tp-accent" style="background:#3b82f6;"></div>
+            </div>
+            <span class="theme-name">深空蓝</span>
+        </div>
+        <div class="theme-item" data-theme="dark-purple">
+            <div class="theme-preview">
+                <div class="tp-bg"    style="background:#0e0b1a;"></div>
+                <div class="tp-panel" style="background:#14112a;"></div>
+                <div class="tp-accent" style="background:#8b5cf6;"></div>
+            </div>
+            <span class="theme-name">极光紫</span>
+        </div>
+        <div class="theme-item" data-theme="dark-cyan">
+            <div class="theme-preview">
+                <div class="tp-bg"    style="background:#091214;"></div>
+                <div class="tp-panel" style="background:#0e1e22;"></div>
+                <div class="tp-accent" style="background:#06b6d4;"></div>
+            </div>
+            <span class="theme-name">深海青</span>
+        </div>
+        <div class="theme-item" data-theme="dark-green">
+            <div class="theme-preview">
+                <div class="tp-bg"    style="background:#091210;"></div>
+                <div class="tp-panel" style="background:#0e1e1a;"></div>
+                <div class="tp-accent" style="background:#10b981;"></div>
+            </div>
+            <span class="theme-name">暗夜翠</span>
+        </div>
+        <div class="theme-item" data-theme="dark-orange">
+            <div class="theme-preview">
+                <div class="tp-bg"    style="background:#130e08;"></div>
+                <div class="tp-panel" style="background:#1e1610;"></div>
+                <div class="tp-accent" style="background:#f97316;"></div>
+            </div>
+            <span class="theme-name">熔岩橙</span>
+        </div>
+        <div class="theme-item" data-theme="chinese-red">
+            <div class="theme-preview">
+                <div class="tp-bg"    style="background:#120808;"></div>
+                <div class="tp-panel" style="background:#1e0e0e;"></div>
+                <div class="tp-accent" style="background:#c0272d;"></div>
+            </div>
+            <span class="theme-name">中国红</span>
+        </div>
+        <div class="theme-item" data-theme="dark-amber">
+            <div class="theme-preview">
+                <div class="tp-bg"    style="background:#130f06;"></div>
+                <div class="tp-panel" style="background:#1e180a;"></div>
+                <div class="tp-accent" style="background:#f59e0b;"></div>
+            </div>
+            <span class="theme-name">琥珀黄</span>
+        </div>
+        <div class="theme-item" data-theme="pitch-black">
+            <div class="theme-preview">
+                <div class="tp-bg"    style="background:#060608;"></div>
+                <div class="tp-panel" style="background:#0c0c12;"></div>
+                <div class="tp-accent" style="background:#4d7cfe;"></div>
+            </div>
+            <span class="theme-name">极夜黑</span>
+        </div>
+    </div>
+</div>
+
+<script src="renderer/app.js"></script>
+</body>
+</html>
