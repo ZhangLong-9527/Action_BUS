@@ -1013,6 +1013,96 @@ body {
 }
 
 /* ============================================
+   Log extras
+   ============================================ */
+.log-row-err { background: rgba(192,39,45,.08); }
+.byte-addr   { color: #f59e0b; }
+.byte-func   { color: #3b82f6; }
+.byte-stat   { color: #8b5cf6; }
+.byte-len    { color: var(--text-secondary); }
+.byte-crc    { color: var(--text-dim); }
+.log-note    { font-size: 10px; color: var(--text-dim); margin-left: 6px; white-space: nowrap; }
+.dc-name     { color: var(--text-primary); }
+.log-dir.info { color: var(--text-dim); }
+
+/* ============================================
+   Canvas widget inner layouts
+   ============================================ */
+
+/* Waveform */
+.wf-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 24px;
+    padding: 0 4px;
+    flex-shrink: 0;
+}
+.wf-src-sel {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 10px;
+    padding: 1px 4px;
+    flex: 1;
+    min-width: 0;
+    outline: none;
+}
+.wf-val { font-size: 11px; font-family: var(--font-mono); color: var(--accent); white-space: nowrap; }
+.wf-canvas { flex: 1; width: 100%; min-height: 0; display: block; }
+
+.widget-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 4px;
+}
+
+/* Attitude */
+.att-vals {
+    display: flex;
+    gap: 12px;
+    padding: 4px 2px;
+    justify-content: center;
+}
+.att-label { font-size: 10px; color: var(--text-dim); margin-right: 4px; }
+.att-num   { font-size: 13px; font-family: var(--font-mono); color: var(--accent); }
+.att-bar-group { display: flex; flex-direction: column; gap: 5px; padding: 2px 4px; }
+.att-bar-wrap { height: 8px; background: var(--bg-canvas); border-radius: 4px; overflow: hidden; }
+.att-bar { height: 100%; background: var(--accent); border-radius: 4px; transition: width .1s; }
+
+/* Number */
+.num-center { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; }
+.num-val    { font-size: 32px; font-weight: 700; color: var(--accent); font-family: var(--font-mono); }
+.num-src    { font-size: 10px; }
+.num-unit   {}
+
+/* Progress bar */
+.pb-track { height: 10px; background: var(--bg-canvas); border-radius: 5px; overflow: hidden; border: 1px solid var(--border); }
+.pb-fill  { height: 100%; background: var(--accent); border-radius: 5px; transition: width .2s; }
+
+/* Status light */
+.sl-center { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+.sl-dot    { width: 28px; height: 28px; border-radius: 50%; background: var(--text-dim); transition: background .2s, box-shadow .2s; }
+.sl-on     { background: var(--accent) !important; box-shadow: 0 0 14px var(--accent); }
+.sl-off    { background: var(--border) !important; box-shadow: none; }
+.sl-err    { background: #ef4444 !important; box-shadow: 0 0 14px #ef4444; }
+.sl-label  { font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono); }
+
+/* Switch */
+.sw-center { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; }
+.sw-btn    { padding: 5px 16px; border: none; border-radius: var(--radius-sm); font-size: 12px; font-weight: 600; cursor: pointer; }
+.sw-on     { background: var(--accent); color: #fff; }
+.sw-on:hover { background: var(--accent-hover); }
+.sw-off    { background: var(--bg-widget); border: 1px solid var(--border); color: var(--text-secondary); }
+
+/* Text widget */
+.text-body { height: 100%; display: flex; align-items: center; justify-content: center; font-size: 13px; color: var(--text-secondary); word-break: break-all; padding: 4px; }
+
+/* ============================================
    Utility
    ============================================ */
 .flex-center { display: flex; align-items: center; justify-content: center; }
