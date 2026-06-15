@@ -86,14 +86,32 @@ class RingBuffer {
    WIDGET STATE  (configs + live APIs)
    ============================================================ */
 
-/** widgetId → { script?, onFrame?, offFrame?, maxPoints?, label? } */
+/** widgetId → { script?, compiledFn?, onFrame?, offFrame?, maxPoints?, label? } */
 const widgetConfigs = new Map();
 
 /** widgetId → { pushChannel(n, v, opts), getChannels(), ... } */
 const widgetAPI = new Map();
 
+/** All widget elements that can receive script data — faster than querySelectorAll each frame */
+const displayWidgets = new Set();
+
 /** Currently selected widget element */
 let selectedWidget = null;
+
+/** Compile a widget script string into a cached Function; returns null on syntax error */
+function compileWidgetScript(code) {
+    try {
+        /* eslint-disable no-new-func */
+        return new Function(
+            'frame','ch','output',
+            'readFloat32BE','readFloat32LE',
+            'readInt16BE','readInt16LE',
+            'readUint16BE','readUint16LE',
+            'readUint32BE','readInt32BE',
+            code
+        );
+    } catch { return null; }
+}
 
 let _widgetCounter = 0;
 function nextWidgetId() { return `w${++_widgetCounter}`; }
@@ -523,27 +541,29 @@ function processRxBuffer() {
    DISPLAY SCRIPT RUNNER
    ============================================================ */
 function runDisplayScripts(frame) {
+    if (displayWidgets.size === 0) return;
     const frameObj = {
         func: frame.func, stat: frame.stat, addr: frame.addr,
         data: new Uint8Array(frame.data),
     };
     const { data } = frameObj;
-    const dv = () => new DataView(data.buffer, data.byteOffset);
+    /* Build helpers once per frame, not once per widget */
+    const dv   = new DataView(data.buffer, data.byteOffset);
     const safe = (fn) => { try { return fn(); } catch { return 0; } };
-    const readFloat32BE = o => safe(() => dv().getFloat32(o, false));
-    const readFloat32LE = o => safe(() => dv().getFloat32(o, true));
-    const readInt16BE   = o => safe(() => dv().getInt16(o, false));
-    const readInt16LE   = o => safe(() => dv().getInt16(o, true));
-    const readUint16BE  = o => safe(() => dv().getUint16(o, false));
-    const readUint16LE  = o => safe(() => dv().getUint16(o, true));
-    const readUint32BE  = o => safe(() => dv().getUint32(o, false));
-    const readInt32BE   = o => safe(() => dv().getInt32(o, false));
+    const readFloat32BE = o => safe(() => dv.getFloat32(o, false));
+    const readFloat32LE = o => safe(() => dv.getFloat32(o, true));
+    const readInt16BE   = o => safe(() => dv.getInt16(o, false));
+    const readInt16LE   = o => safe(() => dv.getInt16(o, true));
+    const readUint16BE  = o => safe(() => dv.getUint16(o, false));
+    const readUint16LE  = o => safe(() => dv.getUint16(o, true));
+    const readUint32BE  = o => safe(() => dv.getUint32(o, false));
+    const readInt32BE   = o => safe(() => dv.getInt32(o, false));
 
-    document.querySelectorAll('.canvas-widget').forEach(widgetEl => {
+    for (const widgetEl of displayWidgets) {
         const cfg = widgetConfigs.get(widgetEl.id);
-        if (!cfg || !cfg.script || !cfg.script.trim()) return;
+        if (!cfg || !cfg.compiledFn) continue;
         const api = widgetAPI.get(widgetEl.id);
-        if (!api || !api.pushChannel) return;
+        if (!api || !api.pushChannel) continue;
 
         function ch(n) {
             return { push: (v, opts = {}) => api.pushChannel(n, v, opts) };
@@ -551,26 +571,22 @@ function runDisplayScripts(frame) {
         function output(v) { ch(0).push(v); }
 
         try {
-            /* eslint-disable no-new-func */
-            const fn = new Function(
-                'frame','ch','output',
-                'readFloat32BE','readFloat32LE',
-                'readInt16BE','readInt16LE',
-                'readUint16BE','readUint16LE',
-                'readUint32BE','readInt32BE',
-                cfg.script
-            );
-            fn(frameObj, ch, output,
+            cfg.compiledFn(frameObj, ch, output,
                readFloat32BE, readFloat32LE,
                readInt16BE, readInt16LE,
                readUint16BE, readUint16LE,
                readUint32BE, readInt32BE);
             clearWidgetScriptError(widgetEl);
         } catch (e) {
-            showWidgetScriptError(widgetEl, e.message);
-            appendDecodedLog('info', new Date(), '—', 'ScriptErr', e.message, 'err');
+            /* Rate-limit error logging: at most once per second per widget */
+            const now = Date.now();
+            if (!cfg._lastErrTime || now - cfg._lastErrTime > 1000) {
+                cfg._lastErrTime = now;
+                showWidgetScriptError(widgetEl, e.message);
+                appendDecodedLog('info', new Date(), '—', 'ScriptErr', e.message, 'err');
+            }
         }
-    });
+    }
 }
 
 function showWidgetScriptError(el, msg) {
@@ -950,8 +966,12 @@ function frameConfigSection(el, cfg, key, title, defaultStat) {
 }
 
 function populateControlPanel(el, cfg, type) {
-    rpanelBody.appendChild(frameConfigSection(el, cfg, 'onFrame',  'ON 帧',  '11'));
-    rpanelBody.appendChild(frameConfigSection(el, cfg, 'offFrame', 'OFF 帧', '10'));
+    if (type === 'slider') {
+        rpanelBody.appendChild(frameConfigSection(el, cfg, 'onFrame', 'TX 帧', '11'));
+    } else {
+        rpanelBody.appendChild(frameConfigSection(el, cfg, 'onFrame',  'ON 帧',  '11'));
+        rpanelBody.appendChild(frameConfigSection(el, cfg, 'offFrame', 'OFF 帧', '10'));
+    }
 }
 
 function populateScriptPanel(el, cfg) {
@@ -982,10 +1002,21 @@ readUint32BE/LE(offset) / readInt32BE(offset)
         const code = document.getElementById('rp-script-area').value;
         const conf = widgetConfigs.get(el.id) || {};
         conf.script = code;
-        widgetConfigs.set(el.id, conf);
-        clearWidgetScriptError(el);
+        conf.compiledFn = compileWidgetScript(code);
         const rErr = document.getElementById('rpanel-script-error');
-        if (rErr) rErr.classList.remove('visible');
+        if (conf.compiledFn) {
+            conf._lastErrTime = 0;
+            clearWidgetScriptError(el);
+            if (rErr) rErr.classList.remove('visible');
+        } else {
+            /* Dry-run to surface the actual syntax error message */
+            try { new Function(code); } catch (e) {
+                const msg = `编译错误: ${e.message}`;
+                showWidgetScriptError(el, msg);
+                if (rErr) { rErr.textContent = msg; rErr.classList.add('visible'); }
+            }
+        }
+        widgetConfigs.set(el.id, conf);
     });
 
     document.getElementById('rp-import-script').addEventListener('click', () => {
@@ -1076,6 +1107,8 @@ document.getElementById('btn-clear-canvas').addEventListener('click', () => {
     canvas.querySelectorAll('.canvas-widget').forEach(w => {
         widgetConfigs.delete(w.id);
         widgetAPI.delete(w.id);
+        displayWidgets.delete(w);
+        if (w._panCleanup) w._panCleanup();
         w.remove();
     });
     hideRightPanel();
@@ -1135,7 +1168,10 @@ document.getElementById('btn-load-layout').addEventListener('click', () => {
                         if (n) n.textContent = wd.label;
                     }
                     const conf = {};
-                    if (wd.script    !== undefined) conf.script    = wd.script;
+                    if (wd.script    !== undefined) {
+                        conf.script     = wd.script;
+                        conf.compiledFn = compileWidgetScript(wd.script);
+                    }
                     if (wd.onFrame   !== undefined) conf.onFrame   = wd.onFrame;
                     if (wd.offFrame  !== undefined) conf.offFrame  = wd.offFrame;
                     if (wd.maxPoints !== undefined) conf.maxPoints = wd.maxPoints;
@@ -1224,9 +1260,11 @@ function createWidget(type, x, y, existingId) {
 
     el.querySelector('.widget-close-btn').addEventListener('click', e => {
         e.stopPropagation();
-        if (el._busUnsub) el._busUnsub();
+        if (el._busUnsub)    el._busUnsub();
+        if (el._panCleanup)  el._panCleanup();
         widgetConfigs.delete(el.id);
         widgetAPI.delete(el.id);
+        displayWidgets.delete(el);
         if (selectedWidget === el) hideRightPanel();
         el.remove();
         if (!canvas.querySelector('.canvas-widget')) canvasHint.style.display = '';
@@ -1244,9 +1282,15 @@ function createWidget(type, x, y, existingId) {
             e.target.classList.contains('widget-csv-btn')) return;
         document.querySelectorAll('.canvas-widget').forEach(w => w.classList.remove('selected'));
         el.classList.add('selected');
+    });
+
+    el.addEventListener('dblclick', e => {
+        if (e.target.classList.contains('widget-close-btn') ||
+            e.target.classList.contains('widget-csv-btn')) return;
         showRightPanel(el);
     });
 
+    displayWidgets.add(el);
     initWidgetContent(el, type);
     return el;
 }
@@ -1271,11 +1315,14 @@ function initWidgetContent(el, type) {
         }));
 
         /* Viewport state */
-        let xView  = initCap;   /* how many points to show on x-axis */
-        let yMode  = 'auto';    /* 'auto' | 'manual' */
+        let xView   = initCap;   /* visible range in samples */
+        let xOffset = 0;          /* pan: samples from end to skip; 0 = show latest */
+        let yMode   = 'auto';
         let yCenter = 0, yRange = 2;
+        let lastYLo = -1, lastYHi = 1;   /* updated each draw; used by zoom handler */
+        let canvasW = 0, canvasH = 0;    /* cached dimensions to avoid resize-on-every-draw */
 
-        body.innerHTML = `<canvas class="wf-canvas" style="width:100%;height:100%;display:block"></canvas>`;
+        body.innerHTML = `<canvas class="wf-canvas" style="width:100%;height:100%;display:block;cursor:grab"></canvas>`;
         const cvs = body.querySelector('.wf-canvas');
         const ctx = cvs.getContext('2d');
 
@@ -1292,7 +1339,11 @@ function initWidgetContent(el, type) {
         function draw() {
             const W = cvs.offsetWidth, H = cvs.offsetHeight;
             if (W === 0 || H === 0) return;
-            cvs.width = W; cvs.height = H;
+            /* Only reset canvas size (expensive) when dimensions actually change */
+            if (W !== canvasW || H !== canvasH) {
+                cvs.width = W; cvs.height = H;
+                canvasW = W; canvasH = H;
+            }
             ctx.clearRect(0, 0, W, H);
 
             const active = channels.filter(c => c.active && c.ring.size > 0);
@@ -1304,7 +1355,12 @@ function initWidgetContent(el, type) {
                 return;
             }
 
-            /* Y range */
+            const maxSz = Math.max(...active.map(c => c.ring.size), 2);
+            xOffset = Math.max(0, Math.min(Math.max(0, maxSz - xView), xOffset));
+            const viewEnd   = maxSz - xOffset;
+            const viewStart = viewEnd - xView;   /* may be negative; clamped per-channel below */
+
+            /* Y range (computed from visible window only) */
             let yLo, yHi;
             if (yMode === 'manual') {
                 yLo = yCenter - yRange / 2;
@@ -1312,15 +1368,18 @@ function initWidgetContent(el, type) {
             } else {
                 yLo = Infinity; yHi = -Infinity;
                 for (const c of active) {
-                    const n = Math.min(c.ring.size, xView);
-                    for (let i = c.ring.size - n; i < c.ring.size; i++) {
+                    const start = Math.max(0, viewStart);
+                    const end   = Math.min(c.ring.size, viewEnd);
+                    for (let i = start; i < end; i++) {
                         const v = c.ring.get(i);
                         if (v < yLo) yLo = v;
                         if (v > yHi) yHi = v;
                     }
                 }
+                if (!isFinite(yLo)) { yLo = -1; yHi = 1; }
                 if (yLo === yHi) { yLo -= 1; yHi += 1; }
             }
+            lastYLo = yLo; lastYHi = yHi;
             const ySpan = yHi - yLo || 1;
             const pad = { t: 18, b: 18, l: 44, r: 8 };
             const W2  = W - pad.l - pad.r;
@@ -1341,16 +1400,18 @@ function initWidgetContent(el, type) {
 
             /* Channels */
             for (const c of active) {
-                const n = Math.min(c.ring.size, xView);
-                if (n < 2) continue;
                 ctx.beginPath();
                 ctx.strokeStyle = c.color;
                 ctx.lineWidth   = c.lineWidth;
-                for (let i = 0; i < n; i++) {
-                    const v  = c.ring.get(c.ring.size - n + i);
-                    const px = pad.l + (i / (xView - 1)) * W2;
+                let first = true;
+                for (let i = 0; i < xView; i++) {
+                    const ri = viewStart + i;
+                    if (ri < 0 || ri >= c.ring.size) { first = true; continue; }
+                    const v  = c.ring.get(ri);
+                    const px = pad.l + (i / Math.max(xView - 1, 1)) * W2;
                     const py = pad.t + (1 - (v - yLo) / ySpan) * H2;
-                    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+                    if (first) { ctx.moveTo(px, py); first = false; }
+                    else        { ctx.lineTo(px, py); }
                 }
                 ctx.stroke();
             }
@@ -1366,23 +1427,76 @@ function initWidgetContent(el, type) {
                 lx += ctx.measureText('■ ' + label).width + 8;
                 if (lx > W - 60) break;
             }
+
+            /* Pan indicator when not at latest */
+            if (xOffset > 0) {
+                ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                ctx.font = '8px var(--font-mono)';
+                ctx.textAlign = 'right';
+                ctx.fillText(`◀ -${xOffset}`, W - pad.r, pad.t - 4);
+            }
         }
 
-        /* Zoom: wheel = X, Ctrl+wheel = Y */
+        /* Pan: left-button drag */
+        let panActive = false, panStartX = 0, panStartOffset = 0;
+        cvs.addEventListener('mousedown', e => {
+            if (e.button !== 0) return;
+            panActive = true;
+            panStartX = e.clientX;
+            panStartOffset = xOffset;
+            cvs.style.cursor = 'grabbing';
+            e.preventDefault();
+        });
+        const onPanMove = e => {
+            if (!panActive) return;
+            const rect = cvs.getBoundingClientRect();
+            const W2 = rect.width - 44 - 8;   /* pad.l=44 pad.r=8 */
+            if (W2 <= 0) return;
+            const delta = Math.round((panStartX - e.clientX) / W2 * xView);
+            const maxSz = Math.max(...channels.filter(c=>c.active).map(c=>c.ring.size), 2);
+            xOffset = Math.max(0, Math.min(Math.max(0, maxSz - xView), panStartOffset + delta));
+            dirty = true; scheduleDraw();
+        };
+        const onPanUp = e => { if (e.button === 0) { panActive = false; cvs.style.cursor = 'grab'; } };
+        document.addEventListener('mousemove', onPanMove);
+        document.addEventListener('mouseup',   onPanUp);
+        el._panCleanup = () => {
+            document.removeEventListener('mousemove', onPanMove);
+            document.removeEventListener('mouseup',   onPanUp);
+        };
+
+        /* Zoom: wheel = X from cursor, Ctrl+wheel = Y from cursor */
         cvs.addEventListener('wheel', e => {
             e.preventDefault();
-            const factor = e.deltaY > 0 ? 1.2 : 0.8;
+            const factor = e.deltaY > 0 ? 1.25 : 0.8;
+            const rect   = cvs.getBoundingClientRect();
+            const pad    = { t: 18, b: 18, l: 44, r: 8 };
+
             if (e.ctrlKey) {
+                /* Y zoom: keep the value under the cursor fixed on screen */
+                const H2 = rect.height - pad.t - pad.b;
+                if (H2 <= 0) return;
+                const relY = Math.max(0, Math.min(1, (e.clientY - rect.top - pad.t) / H2));
+                /* y=0 (top) corresponds to lastYHi; y=1 (bottom) to lastYLo */
+                const yAtMouse = lastYHi - relY * (lastYHi - lastYLo);
                 yMode = 'manual';
-                /* compute current center from auto if switching */
-                if (yMode !== 'manual') {
-                    yCenter = (channels.filter(c=>c.active).reduce((s,c)=>s+c.ring.get(c.ring.size-1),0)) /
-                              (channels.filter(c=>c.active).length || 1);
-                }
-                yRange = Math.max(1e-9, yRange * factor);
+                const newYRange = Math.max(1e-9, yRange * factor);
+                /* yHi_new - relY * newYRange = yAtMouse  →  yCenter_new = yHi_new - newYRange/2 */
+                const newYHi = yAtMouse + relY * newYRange;
+                yCenter = newYHi - newYRange / 2;
+                yRange  = newYRange;
             } else {
+                /* X zoom: keep the sample under the cursor fixed on screen */
+                const W2 = rect.width - pad.l - pad.r;
+                if (W2 <= 0) return;
+                const relX  = Math.max(0, Math.min(1, (e.clientX - rect.left - pad.l) / W2));
                 const maxSz = Math.max(...channels.filter(c=>c.active).map(c=>c.ring.size), 2);
-                xView = Math.min(maxSz, Math.max(2, Math.round(xView * factor)));
+                const newXView = Math.min(maxSz, Math.max(2, Math.round(xView * factor)));
+                /* Derived from: the ring-index at relX must stay at relX after zoom.
+                   newXOffset = xOffset + (1 - relX) * (xView - newXView)          */
+                xOffset = Math.round(xOffset + (1 - relX) * (xView - newXView));
+                xOffset = Math.max(0, Math.min(Math.max(0, maxSz - newXView), xOffset));
+                xView = newXView;
             }
             dirty = true; scheduleDraw();
         }, { passive: false });
@@ -1547,7 +1661,7 @@ function initWidgetContent(el, type) {
                     <span class="sl-lbl">值</span><span class="sl-val-text">—</span>
                 </div>
                 <input type="range" min="0" max="255" value="128" class="sl-range">
-                <div style="font-size:9px;color:var(--text-dim)">在属性面板配置 ON 帧，Data 用 <b>\${v}</b> 占位</div>
+                <div style="font-size:9px;color:var(--text-dim)">在属性面板配置 TX 帧，Data 中 <b>FE</b> 自动替换为当前值</div>
             </div>`;
         const range  = body.querySelector('.sl-range');
         const valTxt = body.querySelector('.sl-val-text');
@@ -1566,7 +1680,95 @@ function initWidgetContent(el, type) {
         break;
     }
 
-    case 'xy':
+    case 'xy': {
+        body.innerHTML = `<canvas class="wf-canvas" style="width:100%;height:100%;display:block"></canvas>`;
+        const cvs = body.querySelector('.wf-canvas');
+        const ctx  = cvs.getContext('2d');
+        const xRing = new RingBuffer(500);
+        const yRing = new RingBuffer(500);
+        let pendingX = null;
+        let dirty = false, rafId = null;
+        let canvasW = 0, canvasH = 0;
+
+        function scheduleDraw() {
+            if (!rafId) rafId = requestAnimationFrame(() => { rafId = null; if (dirty) { draw(); dirty = false; } });
+        }
+
+        function draw() {
+            const W = cvs.offsetWidth, H = cvs.offsetHeight;
+            if (W === 0 || H === 0) return;
+            if (W !== canvasW || H !== canvasH) { cvs.width = W; cvs.height = H; canvasW = W; canvasH = H; }
+            ctx.clearRect(0, 0, W, H);
+            const n = Math.min(xRing.size, yRing.size);
+            const pad = { t: 16, b: 22, l: 44, r: 10 };
+            const W2 = W - pad.l - pad.r, H2 = H - pad.t - pad.b;
+
+            if (n < 2) {
+                ctx.fillStyle = 'rgba(255,255,255,0.15)';
+                ctx.font = '11px var(--font-mono)';
+                ctx.textAlign = 'center';
+                ctx.fillText('等待数据 — ch(0)=X  ch(1)=Y', W / 2, H / 2);
+                return;
+            }
+
+            /* Auto-scale to all stored points */
+            let xLo = Infinity, xHi = -Infinity, yLo = Infinity, yHi = -Infinity;
+            for (let i = 0; i < n; i++) {
+                const x = xRing.get(i), y = yRing.get(i);
+                if (x < xLo) xLo = x; if (x > xHi) xHi = x;
+                if (y < yLo) yLo = y; if (y > yHi) yHi = y;
+            }
+            if (xLo === xHi) { xLo -= 1; xHi += 1; }
+            if (yLo === yHi) { yLo -= 1; yHi += 1; }
+            const xSpan = xHi - xLo, ySpan = yHi - yLo;
+
+            /* Axes */
+            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, pad.t + H2);
+            ctx.moveTo(pad.l, pad.t + H2); ctx.lineTo(pad.l + W2, pad.t + H2);
+            ctx.stroke();
+
+            /* Axis labels */
+            ctx.fillStyle = 'rgba(255,255,255,0.3)';
+            ctx.font = '8px var(--font-mono)';
+            ctx.textAlign = 'right';
+            ctx.fillText(yHi.toFixed(2), pad.l - 2, pad.t + 6);
+            ctx.fillText(yLo.toFixed(2), pad.l - 2, pad.t + H2);
+            ctx.textAlign = 'center';
+            ctx.fillText(xLo.toFixed(2), pad.l + 2, H - 5);
+            ctx.fillText(xHi.toFixed(2), pad.l + W2, H - 5);
+
+            /* Points — older = transparent, newest = opaque */
+            const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#3b82f6';
+            ctx.fillStyle = accent;
+            for (let i = 0; i < n; i++) {
+                const px = pad.l + (xRing.get(i) - xLo) / xSpan * W2;
+                const py = pad.t + (1 - (yRing.get(i) - yLo) / ySpan) * H2;
+                ctx.globalAlpha = 0.15 + 0.85 * (i / (n - 1));
+                ctx.beginPath();
+                ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        widgetAPI.set(el.id, {
+            pushChannel(ch, v) {
+                if (ch === 0) {
+                    pendingX = v;
+                } else if (ch === 1 && pendingX !== null) {
+                    xRing.push(pendingX); yRing.push(v);
+                    pendingX = null;
+                    dirty = true; scheduleDraw();
+                }
+            }
+        });
+        scheduleDraw();
+        break;
+    }
+
     case 'script':
     default: {
         body.innerHTML = `<div style="color:var(--text-dim);font-size:11px;padding:8px;text-align:center">在属性面板绑定脚本</div>`;
