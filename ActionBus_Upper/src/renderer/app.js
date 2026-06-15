@@ -47,16 +47,63 @@ const AB_FUNC = {
     0xFE: 'Action Desc',
 };
 
-/** Function code → widget type to create when user clicks "+" */
-const AB_FUNC_WIDGET = {
-    0x01: 'switch',
-    0x02: 'slider',
-    0x0A: 'waveform',
-    0x0B: 'attitude',
-    0x0C: 'number',
-    0x0D: 'number',
-    0x20: 'text',
-};
+/* ============================================================
+   RING BUFFER  (fixed-capacity, O(1) push, ordered read)
+   ============================================================ */
+class RingBuffer {
+    constructor(capacity) {
+        this.capacity = capacity;
+        this.buf      = new Float64Array(capacity);
+        this.head     = 0;   // next write index
+        this.size     = 0;   // valid entries
+    }
+    push(v) {
+        this.buf[this.head] = v;
+        this.head = (this.head + 1) % this.capacity;
+        if (this.size < this.capacity) this.size++;
+    }
+    /** i=0 → oldest, i=size-1 → newest */
+    get(i) {
+        return this.buf[(this.head - this.size + i + this.capacity * 2) % this.capacity];
+    }
+    toArray() {
+        const a = new Float64Array(this.size);
+        for (let i = 0; i < this.size; i++) a[i] = this.get(i);
+        return a;
+    }
+    resize(newCap) {
+        const data = this.toArray();
+        this.capacity = newCap;
+        this.buf  = new Float64Array(newCap);
+        this.head = 0; this.size = 0;
+        const start = Math.max(0, data.length - newCap);
+        for (let i = start; i < data.length; i++) this.push(data[i]);
+    }
+    clear() { this.head = 0; this.size = 0; }
+}
+
+/* ============================================================
+   WIDGET STATE  (configs + live APIs)
+   ============================================================ */
+
+/** widgetId → { script?, onFrame?, offFrame?, maxPoints?, label? } */
+const widgetConfigs = new Map();
+
+/** widgetId → { pushChannel(n, v, opts), getChannels(), ... } */
+const widgetAPI = new Map();
+
+/** Currently selected widget element */
+let selectedWidget = null;
+
+let _widgetCounter = 0;
+function nextWidgetId() { return `w${++_widgetCounter}`; }
+
+/* Palette of default channel colors (cycles for ch > 7) */
+const CH_COLORS = [
+    '#3b82f6','#f97316','#10b981','#f59e0b',
+    '#8b5cf6','#06b6d4','#ef4444','#84cc16',
+];
+function chColor(n) { return CH_COLORS[n % CH_COLORS.length]; }
 
 /* ============================================================
    DEVICE REGISTRY + DYNAMIC DEVICE LIST
@@ -113,10 +160,9 @@ function renderDeviceList() {
             .filter(([code]) => +code !== 0xF0 && +code !== 0xFE)
             .map(([code, name]) => {
                 const fc = (+code).toString(16).padStart(2,'0').toUpperCase();
-                return `<div class="action-item" data-addr="${addr}" data-func="${+code}">
+                return `<div class="action-item">
                     <span class="action-code">0x${fc}</span>
                     <span class="action-name">${name}</span>
-                    <button class="action-add-btn" title="添加到画布">+</button>
                 </div>`;
             }).join('');
 
@@ -210,33 +256,10 @@ async function scanDevices() {
     }
 }
 
-/* Event delegation on device list — expand/collapse + "+" button */
+/* Event delegation on device list — expand/collapse only */
 document.getElementById('device-list').addEventListener('click', e => {
-    /* "+" button → add widget to canvas */
-    const addBtn = e.target.closest('.action-add-btn');
-    if (addBtn) {
-        const item    = addBtn.closest('.action-item');
-        const func    = parseInt(item.dataset.func, 10);
-        const addr    = parseInt(item.dataset.addr, 10);
-        const type    = AB_FUNC_WIDGET[func] || 'number';
-        const taken   = canvas.querySelectorAll('.canvas-widget').length;
-        const col     = taken % 3, row = Math.floor(taken / 3);
-        const x = 24 + col * 300, y = 24 + row * 180;
-        const w = createWidget(type, x, y);
-        if (w) {
-            w.dataset.boundFunc = func;
-            w.dataset.boundAddr = addr;
-            const nameEl = w.querySelector('.widget-titlebar-name');
-            if (nameEl) nameEl.textContent = `${AB_FUNC[func] || '0x' + func.toString(16)} · ${addrHex(addr)}`;
-        }
-        return;
-    }
-
-    /* Header click → expand/collapse */
     const header = e.target.closest('.device-node-header');
-    if (header) {
-        header.closest('.device-node').classList.toggle('expanded');
-    }
+    if (header) header.closest('.device-node').classList.toggle('expanded');
 });
 
 function s16(hi, lo) {
@@ -488,8 +511,90 @@ function processRxBuffer() {
         /* Resolve any pending await-response query */
         resolveQuery(addr, func, { addr, func, stat, data });
 
-        /* Notify canvas widgets */
+        /* Drive display-widget scripts */
+        runDisplayScripts({ func, stat, addr, data });
+
+        /* Notify canvas widgets (legacy bus) */
         busEmit(func, { func, stat, addr, data });
+    }
+}
+
+/* ============================================================
+   DISPLAY SCRIPT RUNNER
+   ============================================================ */
+function runDisplayScripts(frame) {
+    const frameObj = {
+        func: frame.func, stat: frame.stat, addr: frame.addr,
+        data: new Uint8Array(frame.data),
+    };
+    const { data } = frameObj;
+    const dv = () => new DataView(data.buffer, data.byteOffset);
+    const safe = (fn) => { try { return fn(); } catch { return 0; } };
+    const readFloat32BE = o => safe(() => dv().getFloat32(o, false));
+    const readFloat32LE = o => safe(() => dv().getFloat32(o, true));
+    const readInt16BE   = o => safe(() => dv().getInt16(o, false));
+    const readInt16LE   = o => safe(() => dv().getInt16(o, true));
+    const readUint16BE  = o => safe(() => dv().getUint16(o, false));
+    const readUint16LE  = o => safe(() => dv().getUint16(o, true));
+    const readUint32BE  = o => safe(() => dv().getUint32(o, false));
+    const readInt32BE   = o => safe(() => dv().getInt32(o, false));
+
+    document.querySelectorAll('.canvas-widget').forEach(widgetEl => {
+        const cfg = widgetConfigs.get(widgetEl.id);
+        if (!cfg || !cfg.script || !cfg.script.trim()) return;
+        const api = widgetAPI.get(widgetEl.id);
+        if (!api || !api.pushChannel) return;
+
+        function ch(n) {
+            return { push: (v, opts = {}) => api.pushChannel(n, v, opts) };
+        }
+        function output(v) { ch(0).push(v); }
+
+        try {
+            /* eslint-disable no-new-func */
+            const fn = new Function(
+                'frame','ch','output',
+                'readFloat32BE','readFloat32LE',
+                'readInt16BE','readInt16LE',
+                'readUint16BE','readUint16LE',
+                'readUint32BE','readInt32BE',
+                cfg.script
+            );
+            fn(frameObj, ch, output,
+               readFloat32BE, readFloat32LE,
+               readInt16BE, readInt16LE,
+               readUint16BE, readUint16LE,
+               readUint32BE, readInt32BE);
+            clearWidgetScriptError(widgetEl);
+        } catch (e) {
+            showWidgetScriptError(widgetEl, e.message);
+            appendDecodedLog('info', new Date(), '—', 'ScriptErr', e.message, 'err');
+        }
+    });
+}
+
+function showWidgetScriptError(el, msg) {
+    let banner = el.querySelector('.widget-script-err');
+    if (!banner) {
+        banner = document.createElement('div');
+        banner.className = 'widget-script-err';
+        el.appendChild(banner);
+    }
+    banner.textContent = msg;
+    banner.classList.add('visible');
+    /* Also show in right panel if this widget is selected */
+    if (selectedWidget === el) {
+        const rErr = document.getElementById('rpanel-script-error');
+        if (rErr) { rErr.textContent = msg; rErr.classList.add('visible'); }
+    }
+}
+
+function clearWidgetScriptError(el) {
+    const banner = el.querySelector('.widget-script-err');
+    if (banner) banner.classList.remove('visible');
+    if (selectedWidget === el) {
+        const rErr = document.getElementById('rpanel-script-error');
+        if (rErr) rErr.classList.remove('visible');
     }
 }
 
@@ -718,6 +823,225 @@ document.querySelectorAll('.panel-tab').forEach(tab => {
 
 
 /* ============================================================
+   RIGHT PANEL — properties + script editor
+   ============================================================ */
+const rightPanel  = document.getElementById('right-panel');
+const rightSep    = document.getElementById('right-sep');
+const rpanelBody  = document.getElementById('rpanel-body');
+const rpanelType  = document.getElementById('rpanel-widget-type');
+
+document.getElementById('rpanel-close').addEventListener('click', () => hideRightPanel());
+
+/* Right sep drag */
+rightSep.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const startX = e.clientX, startW = rightPanel.offsetWidth;
+    const onMove = mv => {
+        const w = Math.max(200, Math.min(520, startW - (mv.clientX - startX)));
+        rightPanel.style.width = w + 'px';
+    };
+    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+});
+
+function showRightPanel(widgetEl) {
+    selectedWidget = widgetEl;
+    rightPanel.style.display = 'flex';
+    rightSep.style.display   = '';
+    const meta = WIDGET_META[widgetEl.dataset.type] || {};
+    rpanelType.textContent = meta.name || widgetEl.dataset.type;
+    populateRightPanel(widgetEl);
+}
+
+function hideRightPanel() {
+    selectedWidget = null;
+    rightPanel.style.display = 'none';
+    rightSep.style.display   = 'none';
+    rpanelBody.innerHTML     = '';
+}
+
+const CONTROL_TYPES = new Set(['switch', 'slider']);
+const DISPLAY_TYPES = new Set(['waveform','attitude','gauge','number','progressbar','xy','statuslight','text','script']);
+
+const FUNC_OPTIONS = Object.entries(AB_FUNC)
+    .filter(([c]) => +c < 0xF0)
+    .map(([c, n]) => `<option value="${+c}">0x${(+c).toString(16).padStart(2,'0').toUpperCase()} ${n}</option>`)
+    .join('');
+
+function populateRightPanel(el) {
+    const cfg  = widgetConfigs.get(el.id) || {};
+    const type = el.dataset.type;
+    rpanelBody.innerHTML = '';
+
+    /* ── Label row ── */
+    const labelRow = document.createElement('div');
+    labelRow.className = 'rp-section';
+    const nameEl = el.querySelector('.widget-titlebar-name');
+    labelRow.innerHTML = `
+        <div class="rp-section-title">标签</div>
+        <div class="rp-row">
+            <input class="rp-input" id="rp-label" value="${nameEl?.textContent || ''}">
+        </div>`;
+    rpanelBody.appendChild(labelRow);
+    document.getElementById('rp-label').addEventListener('input', function() {
+        if (nameEl) nameEl.textContent = this.value;
+        (widgetConfigs.get(el.id) || {}).label = this.value;
+    });
+
+    if (CONTROL_TYPES.has(type)) {
+        populateControlPanel(el, cfg, type);
+    } else if (DISPLAY_TYPES.has(type)) {
+        populateScriptPanel(el, cfg);
+    }
+
+    /* ── waveform extras ── */
+    if (type === 'waveform') populateWaveformExtras(el, cfg);
+}
+
+function frameConfigSection(el, cfg, key, title, defaultStat) {
+    const fc = (cfg[key] || {});
+    const sec = document.createElement('div');
+    sec.className = 'rp-section';
+    const funcVal = fc.func != null ? fc.func : '';
+    const statVal = fc.stat != null ? fc.stat.toString(16) : defaultStat;
+    const dataVal = (fc.data || []).map(b => b.toString(16).padStart(2,'0')).join(' ');
+    sec.innerHTML = `
+        <div class="rp-section-title">${title}</div>
+        <div class="rp-row">
+            <span class="rp-label">Func</span>
+            <select class="rp-select rp-func-${key}">
+                <option value="">— 选择 —</option>
+                ${FUNC_OPTIONS}
+            </select>
+        </div>
+        <div class="rp-row">
+            <span class="rp-label">Func手填</span>
+            <input class="rp-input rp-func-custom-${key}" placeholder="0x0D" value="${funcVal !== '' ? '0x'+funcVal.toString(16) : ''}">
+        </div>
+        <div class="rp-row">
+            <span class="rp-label">Stat</span>
+            <input class="rp-input rp-stat-${key}" value="${statVal}" style="width:44px;flex:none">
+        </div>
+        <div class="rp-row">
+            <span class="rp-label">Data</span>
+            <input class="rp-input rp-data-${key}" placeholder="hex bytes, 空格分隔" value="${dataVal}">
+        </div>`;
+
+    const selEl    = sec.querySelector(`.rp-func-${key}`);
+    const customEl = sec.querySelector(`.rp-func-custom-${key}`);
+    const statEl   = sec.querySelector(`.rp-stat-${key}`);
+    const dataEl   = sec.querySelector(`.rp-data-${key}`);
+
+    if (funcVal !== '') selEl.value = funcVal;
+
+    function save() {
+        const rawFunc = customEl.value.trim();
+        const funcNum = rawFunc ? parseInt(rawFunc.replace(/^0x/i,''), 16)
+                                : parseInt(selEl.value, 10);
+        const stat = parseInt(statEl.value.replace(/^0x/i,''), 16);
+        const data = parseHexStr(dataEl.value);
+        const conf = widgetConfigs.get(el.id) || {};
+        conf[key] = { func: funcNum, stat: isNaN(stat) ? (defaultStat === '11' ? 0x11 : 0x10) : stat, data };
+        widgetConfigs.set(el.id, conf);
+    }
+    [selEl, customEl, statEl, dataEl].forEach(i => i.addEventListener('change', save));
+    return sec;
+}
+
+function populateControlPanel(el, cfg, type) {
+    rpanelBody.appendChild(frameConfigSection(el, cfg, 'onFrame',  'ON 帧',  '11'));
+    rpanelBody.appendChild(frameConfigSection(el, cfg, 'offFrame', 'OFF 帧', '10'));
+}
+
+function populateScriptPanel(el, cfg) {
+    const sec = document.createElement('div');
+    sec.className = 'rp-section';
+    const scriptText = cfg.script || '';
+    sec.innerHTML = `
+        <div class="rp-section-title">绑定脚本</div>
+        <div class="rp-script-toolbar">
+            <span class="rp-label" style="width:auto;flex:1;font-size:10px;color:var(--text-dim)">每帧触发一次</span>
+            <button class="rp-btn" id="rp-import-script">导入 JS</button>
+            <button class="rp-btn primary" id="rp-apply-script">应用</button>
+        </div>
+        <textarea class="rp-script-area" id="rp-script-area" spellcheck="false">${scriptText}</textarea>
+        <div class="rp-script-error" id="rpanel-script-error"></div>
+        <div class="rp-api-hint">
+frame.func / .stat / .addr / .data (Uint8Array)<br>
+ch(n).push(value, {color?, lineWidth?, label?})<br>
+output(v)  →  ch(0).push(v)<br>
+readFloat32BE/LE(offset)<br>
+readInt16BE/LE(offset)<br>
+readUint16BE/LE(offset)<br>
+readUint32BE/LE(offset) / readInt32BE(offset)
+        </div>`;
+    rpanelBody.appendChild(sec);
+
+    document.getElementById('rp-apply-script').addEventListener('click', () => {
+        const code = document.getElementById('rp-script-area').value;
+        const conf = widgetConfigs.get(el.id) || {};
+        conf.script = code;
+        widgetConfigs.set(el.id, conf);
+        clearWidgetScriptError(el);
+        const rErr = document.getElementById('rpanel-script-error');
+        if (rErr) rErr.classList.remove('visible');
+    });
+
+    document.getElementById('rp-import-script').addEventListener('click', () => {
+        const inp = document.createElement('input');
+        inp.type = 'file'; inp.accept = '.js,.txt';
+        inp.addEventListener('change', () => {
+            const f = inp.files[0]; if (!f) return;
+            const reader = new FileReader();
+            reader.onload = ev => {
+                const area = document.getElementById('rp-script-area');
+                if (area) area.value = ev.target.result;
+            };
+            reader.readAsText(f);
+        });
+        inp.click();
+    });
+}
+
+function populateWaveformExtras(el, cfg) {
+    const api = widgetAPI.get(el.id);
+    const sec = document.createElement('div');
+    sec.className = 'rp-section';
+    const pts = cfg.maxPoints || 1000;
+    sec.innerHTML = `
+        <div class="rp-section-title">波形图设置</div>
+        <div class="rp-row">
+            <span class="rp-label">历史点数</span>
+            <select class="rp-select" id="rp-maxpoints">
+                ${[50,200,500,1000,2000,5000].map(v =>
+                    `<option value="${v}"${v===pts?' selected':''}>${v} pts</option>`).join('')}
+            </select>
+        </div>
+        <div class="rp-row" style="margin-top:2px">
+            <button class="rp-btn" id="rp-clear-wf">清空数据</button>
+            <button class="rp-btn primary" id="rp-export-csv">↓ 导出 CSV</button>
+        </div>`;
+    rpanelBody.appendChild(sec);
+
+    document.getElementById('rp-maxpoints').addEventListener('change', function() {
+        const n = parseInt(this.value);
+        const conf = widgetConfigs.get(el.id) || {};
+        conf.maxPoints = n;
+        widgetConfigs.set(el.id, conf);
+        if (api && api.setMaxPoints) api.setMaxPoints(n);
+    });
+
+    document.getElementById('rp-clear-wf').addEventListener('click', () => {
+        if (api && api.clearChannels) api.clearChannels();
+    });
+
+    document.getElementById('rp-export-csv').addEventListener('click', () => {
+        if (api && api.exportCSV) api.exportCSV();
+    });
+}
+
+/* ============================================================
    BOTTOM PANEL — drag resize
    ============================================================ */
 const bottomPanel  = document.getElementById('bottom-panel');
@@ -749,8 +1073,87 @@ document.getElementById('btn-grid-snap').addEventListener('click', function () {
 });
 
 document.getElementById('btn-clear-canvas').addEventListener('click', () => {
-    canvas.querySelectorAll('.canvas-widget').forEach(w => w.remove());
+    canvas.querySelectorAll('.canvas-widget').forEach(w => {
+        widgetConfigs.delete(w.id);
+        widgetAPI.delete(w.id);
+        w.remove();
+    });
+    hideRightPanel();
     canvasHint.style.display = '';
+});
+
+/* Click on canvas background deselects widget + hides right panel */
+canvas.addEventListener('mousedown', e => {
+    if (e.target === canvas || e.target === canvasHint) {
+        canvas.querySelectorAll('.canvas-widget').forEach(w => w.classList.remove('selected'));
+        hideRightPanel();
+    }
+});
+
+/* ── Save / Load layout ── */
+document.getElementById('btn-save-layout').addEventListener('click', () => {
+    const widgets = [];
+    canvas.querySelectorAll('.canvas-widget').forEach(w => {
+        const cfg  = widgetConfigs.get(w.id) || {};
+        const name = w.querySelector('.widget-titlebar-name')?.textContent || '';
+        widgets.push({
+            type: w.dataset.type,
+            x: parseInt(w.style.left), y: parseInt(w.style.top),
+            w: w.offsetWidth,          h: w.offsetHeight,
+            label: name,
+            ...cfg,
+        });
+    });
+    const json = JSON.stringify({ version: 1, widgets }, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = Object.assign(document.createElement('a'), { href: url, download: 'layout.json' });
+    a.click(); URL.revokeObjectURL(url);
+});
+
+document.getElementById('btn-load-layout').addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.json';
+    inp.addEventListener('change', () => {
+        const f = inp.files[0]; if (!f) return;
+        const reader = new FileReader();
+        reader.onload = ev => {
+            try {
+                const { widgets } = JSON.parse(ev.target.result);
+                canvas.querySelectorAll('.canvas-widget').forEach(w => {
+                    widgetConfigs.delete(w.id); widgetAPI.delete(w.id); w.remove();
+                });
+                hideRightPanel();
+                canvasHint.style.display = '';
+                widgets.forEach(wd => {
+                    const el = createWidget(wd.type, wd.x, wd.y);
+                    if (!el) return;
+                    el.style.width  = wd.w + 'px';
+                    el.style.height = wd.h + 'px';
+                    if (wd.label) {
+                        const n = el.querySelector('.widget-titlebar-name');
+                        if (n) n.textContent = wd.label;
+                    }
+                    const conf = {};
+                    if (wd.script    !== undefined) conf.script    = wd.script;
+                    if (wd.onFrame   !== undefined) conf.onFrame   = wd.onFrame;
+                    if (wd.offFrame  !== undefined) conf.offFrame  = wd.offFrame;
+                    if (wd.maxPoints !== undefined) conf.maxPoints = wd.maxPoints;
+                    widgetConfigs.set(el.id, conf);
+                    /* Apply maxPoints to waveform ring buffers */
+                    if (wd.type === 'waveform' && wd.maxPoints) {
+                        const api = widgetAPI.get(el.id);
+                        if (api && api.setMaxPoints) api.setMaxPoints(wd.maxPoints);
+                    }
+                });
+                if (canvas.querySelector('.canvas-widget')) canvasHint.style.display = 'none';
+            } catch (e) {
+                appendDecodedLog('info', new Date(), '—', 'System', `布局加载失败: ${e.message}`, 'err');
+            }
+        };
+        reader.readAsText(f);
+    });
+    inp.click();
 });
 
 const WIDGET_META = {
@@ -786,12 +1189,13 @@ canvas.addEventListener('drop', e => {
 
 
 /* ── Widget factory ─────────────────────────────────────── */
-function createWidget(type, x, y) {
+function createWidget(type, x, y, existingId) {
     const meta = WIDGET_META[type];
-    if (!meta) return;
+    if (!meta) return null;
     canvasHint.style.display = 'none';
 
     const el = document.createElement('div');
+    el.id          = existingId || nextWidgetId();
     el.className   = 'canvas-widget';
     el.style.left  = x + 'px';
     el.style.top   = y + 'px';
@@ -799,10 +1203,14 @@ function createWidget(type, x, y) {
     el.style.height = meta.h + 'px';
     el.dataset.type = type;
 
+    const csvBtn = type === 'waveform'
+        ? `<button class="widget-csv-btn" title="导出 CSV">↓</button>` : '';
+
     el.innerHTML = `
         <div class="widget-titlebar">
             <span class="widget-titlebar-icon">${meta.icon}</span>
             <span class="widget-titlebar-name">${meta.name}</span>
+            ${csvBtn}
             <button class="widget-close-btn" title="关闭">✕</button>
         </div>
         <div class="widget-body"></div>
@@ -812,15 +1220,31 @@ function createWidget(type, x, y) {
     makeDraggable(el);
     makeResizable(el);
 
-    el.querySelector('.widget-close-btn').addEventListener('click', () => {
+    if (!widgetConfigs.has(el.id)) widgetConfigs.set(el.id, {});
+
+    el.querySelector('.widget-close-btn').addEventListener('click', e => {
+        e.stopPropagation();
         if (el._busUnsub) el._busUnsub();
+        widgetConfigs.delete(el.id);
+        widgetAPI.delete(el.id);
+        if (selectedWidget === el) hideRightPanel();
         el.remove();
         if (!canvas.querySelector('.canvas-widget')) canvasHint.style.display = '';
     });
 
-    el.addEventListener('mousedown', () => {
+    const csvBtnEl = el.querySelector('.widget-csv-btn');
+    if (csvBtnEl) csvBtnEl.addEventListener('click', e => {
+        e.stopPropagation();
+        const api = widgetAPI.get(el.id);
+        if (api && api.exportCSV) api.exportCSV();
+    });
+
+    el.addEventListener('mousedown', e => {
+        if (e.target.classList.contains('widget-close-btn') ||
+            e.target.classList.contains('widget-csv-btn')) return;
         document.querySelectorAll('.canvas-widget').forEach(w => w.classList.remove('selected'));
         el.classList.add('selected');
+        showRightPanel(el);
     });
 
     initWidgetContent(el, type);
@@ -834,287 +1258,322 @@ function initWidgetContent(el, type) {
     switch (type) {
 
     case 'waveform': {
-        body.innerHTML = `
-            <div class="wf-header">
-                <select class="wf-src-sel" title="绑定数据源">
-                    <option value="">— 未绑定 —</option>
-                    <option value="0x0A:temp">0x0A 温度 (°C×100)</option>
-                    <option value="0x0B:roll">0x0B Roll</option>
-                    <option value="0x0B:pitch">0x0B Pitch</option>
-                    <option value="0x0B:yaw">0x0B Yaw</option>
-                    <option value="0x0C:adc">0x0C ADC 值</option>
-                    <option value="0x0D:uptime">0x0D Uptime (s)</option>
-                </select>
-                <span class="wf-val">—</span>
-            </div>
-            <canvas class="wf-canvas"></canvas>`;
-        const cvs  = body.querySelector('.wf-canvas');
-        const sel  = body.querySelector('.wf-src-sel');
-        const valEl = body.querySelector('.wf-val');
-        const pts  = new Array(80).fill(null);
-        let min = Infinity, max = -Infinity;
-        let animId = null;
+        const MAX_CH   = 32;
+        const initCap  = (widgetConfigs.get(el.id) || {}).maxPoints || 1000;
+
+        /* Per-channel state */
+        const channels = Array.from({ length: MAX_CH }, (_, i) => ({
+            ring:      new RingBuffer(initCap),
+            color:     chColor(i),
+            lineWidth: 1.5,
+            label:     '',
+            active:    false,
+        }));
+
+        /* Viewport state */
+        let xView  = initCap;   /* how many points to show on x-axis */
+        let yMode  = 'auto';    /* 'auto' | 'manual' */
+        let yCenter = 0, yRange = 2;
+
+        body.innerHTML = `<canvas class="wf-canvas" style="width:100%;height:100%;display:block"></canvas>`;
+        const cvs = body.querySelector('.wf-canvas');
+        const ctx = cvs.getContext('2d');
+
+        let dirty = false;
+        let rafId = null;
+
+        function scheduleDraw() {
+            if (!rafId) rafId = requestAnimationFrame(() => {
+                rafId = null;
+                if (dirty) { draw(); dirty = false; }
+            });
+        }
 
         function draw() {
             const W = cvs.offsetWidth, H = cvs.offsetHeight;
+            if (W === 0 || H === 0) return;
             cvs.width = W; cvs.height = H;
-            const ctx = cvs.getContext('2d');
             ctx.clearRect(0, 0, W, H);
 
-            const valid = pts.filter(v => v !== null);
-            if (valid.length < 2) {
-                ctx.fillStyle = 'var(--text-dim)';
-                ctx.font = '11px var(--font-sans)';
+            const active = channels.filter(c => c.active && c.ring.size > 0);
+            if (active.length === 0) {
+                ctx.fillStyle = 'rgba(255,255,255,0.15)';
+                ctx.font = '11px var(--font-mono)';
                 ctx.textAlign = 'center';
-                ctx.fillText('等待数据…', W / 2, H / 2);
+                ctx.fillText('等待数据 — 在右侧属性面板绑定脚本', W / 2, H / 2);
                 return;
             }
 
-            const lo = Math.min(...valid), hi = Math.max(...valid);
-            const range = hi - lo || 1;
-            const pad = 6;
-
-            /* Grid lines */
-            ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-            ctx.lineWidth = 1;
-            [0.25, 0.5, 0.75].forEach(f => {
-                ctx.beginPath();
-                ctx.moveTo(0, pad + (1 - f) * (H - pad * 2));
-                ctx.lineTo(W, pad + (1 - f) * (H - pad * 2));
-                ctx.stroke();
-            });
-
-            /* Waveform */
-            ctx.beginPath();
-            ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#3b82f6';
-            ctx.lineWidth = 1.5;
-            let first = true;
-            pts.forEach((v, i) => {
-                if (v === null) return;
-                const px = (i / (pts.length - 1)) * W;
-                const py = pad + (1 - (v - lo) / range) * (H - pad * 2);
-                if (first) { ctx.moveTo(px, py); first = false; } else ctx.lineTo(px, py);
-            });
-            ctx.stroke();
-
-            /* Min/max labels */
-            ctx.fillStyle = 'var(--text-dim)';
-            ctx.font = '9px var(--font-mono)';
-            ctx.textAlign = 'left';
-            ctx.fillText(hi.toFixed(1), 2, pad + 7);
-            ctx.fillText(lo.toFixed(1), 2, H - 3);
-        }
-
-        function pushValue(v) {
-            pts.shift(); pts.push(v);
-            valEl.textContent = v.toFixed(2);
-            cancelAnimationFrame(animId);
-            animId = requestAnimationFrame(draw);
-        }
-
-        function bindSource(key) {
-            if (el._busUnsub) { el._busUnsub(); el._busUnsub = null; }
-            if (!key) return;
-            const [funcHex, field] = key.split(':');
-            const func = parseInt(funcHex, 16);
-            el._busUnsub = busOn(func, ({ data, stat }) => {
-                if (stat & 0x10) return; // ignore TX frames
-                let v = null;
-                switch (field) {
-                    case 'temp':   if (data.length >= 2) v = s16(data[0], data[1]) / 100; break;
-                    case 'roll':   if (data.length >= 2) v = s16(data[0], data[1]) / 100; break;
-                    case 'pitch':  if (data.length >= 4) v = s16(data[2], data[3]) / 100; break;
-                    case 'yaw':    if (data.length >= 6) v = s16(data[4], data[5]) / 100; break;
-                    case 'adc':    if (data.length >= 3) v = (data[1] << 8) | data[2];    break;
-                    case 'uptime': if (data.length >= 4) v = ((data[0]<<24)|(data[1]<<16)|(data[2]<<8)|data[3]) / 1000; break;
+            /* Y range */
+            let yLo, yHi;
+            if (yMode === 'manual') {
+                yLo = yCenter - yRange / 2;
+                yHi = yCenter + yRange / 2;
+            } else {
+                yLo = Infinity; yHi = -Infinity;
+                for (const c of active) {
+                    const n = Math.min(c.ring.size, xView);
+                    for (let i = c.ring.size - n; i < c.ring.size; i++) {
+                        const v = c.ring.get(i);
+                        if (v < yLo) yLo = v;
+                        if (v > yHi) yHi = v;
+                    }
                 }
-                if (v !== null) pushValue(v);
+                if (yLo === yHi) { yLo -= 1; yHi += 1; }
+            }
+            const ySpan = yHi - yLo || 1;
+            const pad = { t: 18, b: 18, l: 44, r: 8 };
+            const W2  = W - pad.l - pad.r;
+            const H2  = H - pad.t - pad.b;
+
+            /* Grid */
+            ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+            ctx.lineWidth = 1;
+            [0, 0.25, 0.5, 0.75, 1].forEach(f => {
+                const y = pad.t + f * H2;
+                ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+                const val = yHi - f * ySpan;
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.font = '8px var(--font-mono)';
+                ctx.textAlign = 'right';
+                ctx.fillText(val.toFixed(2), pad.l - 2, y + 3);
             });
+
+            /* Channels */
+            for (const c of active) {
+                const n = Math.min(c.ring.size, xView);
+                if (n < 2) continue;
+                ctx.beginPath();
+                ctx.strokeStyle = c.color;
+                ctx.lineWidth   = c.lineWidth;
+                for (let i = 0; i < n; i++) {
+                    const v  = c.ring.get(c.ring.size - n + i);
+                    const px = pad.l + (i / (xView - 1)) * W2;
+                    const py = pad.t + (1 - (v - yLo) / ySpan) * H2;
+                    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+            }
+
+            /* Legend */
+            let lx = pad.l + 4;
+            for (const c of active) {
+                ctx.fillStyle = c.color;
+                ctx.font = '9px var(--font-mono)';
+                ctx.textAlign = 'left';
+                const label = c.label || `ch${channels.indexOf(c)}`;
+                ctx.fillText('■ ' + label, lx, pad.t - 4);
+                lx += ctx.measureText('■ ' + label).width + 8;
+                if (lx > W - 60) break;
+            }
         }
 
-        sel.addEventListener('change', () => bindSource(sel.value));
-        requestAnimationFrame(draw);
+        /* Zoom: wheel = X, Ctrl+wheel = Y */
+        cvs.addEventListener('wheel', e => {
+            e.preventDefault();
+            const factor = e.deltaY > 0 ? 1.2 : 0.8;
+            if (e.ctrlKey) {
+                yMode = 'manual';
+                /* compute current center from auto if switching */
+                if (yMode !== 'manual') {
+                    yCenter = (channels.filter(c=>c.active).reduce((s,c)=>s+c.ring.get(c.ring.size-1),0)) /
+                              (channels.filter(c=>c.active).length || 1);
+                }
+                yRange = Math.max(1e-9, yRange * factor);
+            } else {
+                const maxSz = Math.max(...channels.filter(c=>c.active).map(c=>c.ring.size), 2);
+                xView = Math.min(maxSz, Math.max(2, Math.round(xView * factor)));
+            }
+            dirty = true; scheduleDraw();
+        }, { passive: false });
+
+        /* Public API */
+        function pushChannel(n, v, opts = {}) {
+            if (n < 0 || n >= MAX_CH) return;
+            const c = channels[n];
+            c.ring.push(v);
+            c.active = true;
+            if (opts.color     !== undefined) c.color     = opts.color;
+            if (opts.lineWidth !== undefined) c.lineWidth = opts.lineWidth;
+            if (opts.label     !== undefined) c.label     = opts.label;
+            dirty = true;
+            scheduleDraw();
+        }
+
+        function setMaxPoints(n) {
+            channels.forEach(c => c.ring.resize(n));
+            xView = Math.min(xView, n);
+        }
+
+        function clearChannels() {
+            channels.forEach(c => { c.ring.clear(); c.active = false; });
+            dirty = true; scheduleDraw();
+        }
+
+        function exportCSV() {
+            const active = channels.map((c, i) => ({ c, i })).filter(({ c }) => c.active && c.ring.size > 0);
+            if (!active.length) return;
+            const maxLen = Math.max(...active.map(({ c }) => c.ring.size));
+            const header = ['Index', ...active.map(({ c, i }) => c.label || `Ch${i}`)].join(',');
+            const rows   = [header];
+            for (let r = 0; r < maxLen; r++) {
+                const row = [r];
+                for (const { c } of active) {
+                    const offset = r - (maxLen - c.ring.size);
+                    row.push(offset >= 0 ? c.ring.get(offset).toFixed(8) : '');
+                }
+                rows.push(row.join(','));
+            }
+            const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+            const url  = URL.createObjectURL(blob);
+            const a    = Object.assign(document.createElement('a'), { href: url, download: `waveform_${Date.now()}.csv` });
+            a.click(); URL.revokeObjectURL(url);
+        }
+
+        widgetAPI.set(el.id, { pushChannel, setMaxPoints, clearChannels, exportCSV,
+                                getChannels: () => channels });
+        scheduleDraw();
         break;
     }
 
+    /* ── Display widgets: script-driven ── */
     case 'attitude': {
         body.innerHTML = `
             <div class="att-vals">
-                <div><span class="att-label">Roll</span><span class="att-num" id="att-roll">0.00°</span></div>
-                <div><span class="att-label">Pitch</span><span class="att-num" id="att-pitch">0.00°</span></div>
-                <div><span class="att-label">Yaw</span><span class="att-num" id="att-yaw">0.00°</span></div>
+                <div><span class="att-label">Ch0</span><span class="att-num att-ch0">—</span></div>
+                <div><span class="att-label">Ch1</span><span class="att-num att-ch1">—</span></div>
+                <div><span class="att-label">Ch2</span><span class="att-num att-ch2">—</span></div>
             </div>
             <div class="att-bar-group">
-                <div class="att-bar-wrap"><div class="att-bar" id="att-bar-roll" style="width:50%"></div></div>
-                <div class="att-bar-wrap"><div class="att-bar" id="att-bar-pitch" style="width:50%"></div></div>
-                <div class="att-bar-wrap"><div class="att-bar" id="att-bar-yaw" style="width:50%"></div></div>
+                <div class="att-bar-wrap"><div class="att-bar att-bar0" style="width:50%"></div></div>
+                <div class="att-bar-wrap"><div class="att-bar att-bar1" style="width:50%"></div></div>
+                <div class="att-bar-wrap"><div class="att-bar att-bar2" style="width:50%"></div></div>
             </div>`;
-
-        el._busUnsub = busOn(0x0B, ({ data, stat }) => {
-            if (stat & 0x10 || data.length < 6) return;
-            const r = s16(data[0], data[1]) / 100;
-            const p = s16(data[2], data[3]) / 100;
-            const y = s16(data[4], data[5]) / 100;
-            const rEl = el.querySelector('#att-roll');
-            const pEl = el.querySelector('#att-pitch');
-            const yEl = el.querySelector('#att-yaw');
-            if (rEl) rEl.textContent = r.toFixed(2) + '°';
-            if (pEl) pEl.textContent = p.toFixed(2) + '°';
-            if (yEl) yEl.textContent = y.toFixed(2) + '°';
-            const rb = el.querySelector('#att-bar-roll');
-            const pb = el.querySelector('#att-bar-pitch');
-            const yb = el.querySelector('#att-bar-yaw');
-            if (rb) rb.style.width = ((r / 360 + 0.5) * 100).toFixed(1) + '%';
-            if (pb) pb.style.width = ((p / 180 + 0.5) * 100).toFixed(1) + '%';
-            if (yb) yb.style.width = ((y / 360 + 0.5) * 100).toFixed(1) + '%';
+        const vals = ['.att-ch0','.att-ch1','.att-ch2'].map(s => body.querySelector(s));
+        const bars = ['.att-bar0','.att-bar1','.att-bar2'].map(s => body.querySelector(s));
+        widgetAPI.set(el.id, {
+            pushChannel(n, v) {
+                if (n > 2) return;
+                if (vals[n]) vals[n].textContent = v.toFixed(2);
+                if (bars[n]) bars[n].style.width = Math.min(100, Math.max(0, (v / 360 + 0.5) * 100)).toFixed(1) + '%';
+            }
         });
+        body.insertAdjacentHTML('beforeend',
+            '<div class="widget-hint-script">在属性面板绑定脚本<br>ch(0)=Roll ch(1)=Pitch ch(2)=Yaw</div>');
         break;
     }
 
     case 'gauge':
     case 'number': {
-        body.innerHTML = `
-            <div class="num-center">
-                <div class="num-val">—</div>
-                <div class="num-unit">
-                    <select class="wf-src-sel num-src">
-                        <option value="">— 未绑定 —</option>
-                        <option value="0x0A:temp">0x0A 温度 (°C)</option>
-                        <option value="0x0C:adc">0x0C ADC</option>
-                        <option value="0x0D:tasks">0x0D Tasks</option>
-                    </select>
-                </div>
-            </div>`;
+        body.innerHTML = `<div class="num-center"><div class="num-val">—</div><div class="num-unit" style="font-size:10px;color:var(--text-dim);margin-top:4px">绑定脚本后生效</div></div>`;
         const valEl = body.querySelector('.num-val');
-        const selEl = body.querySelector('.num-src');
-
-        function bindNum(key) {
-            if (el._busUnsub) { el._busUnsub(); el._busUnsub = null; }
-            if (!key) return;
-            const [funcHex, field] = key.split(':');
-            const func = parseInt(funcHex, 16);
-            el._busUnsub = busOn(func, ({ data, stat }) => {
-                if (stat & 0x10) return;
-                let v = null;
-                switch (field) {
-                    case 'temp':  if (data.length >= 2) v = (s16(data[0], data[1]) / 100).toFixed(2) + ' °C'; break;
-                    case 'adc':   if (data.length >= 3) v = ((data[1] << 8) | data[2]).toString(); break;
-                    case 'tasks': if (data.length >= 7) v = data[6].toString(); break;
-                }
-                if (v !== null) valEl.textContent = v;
-            });
-        }
-        selEl.addEventListener('change', () => bindNum(selEl.value));
+        widgetAPI.set(el.id, { pushChannel(n, v) { if (n === 0) valEl.textContent = typeof v === 'number' ? v.toFixed(4) : v; } });
         break;
     }
 
     case 'progressbar': {
         body.innerHTML = `
-            <div style="padding:0 4px;display:flex;flex-direction:column;justify-content:center;gap:8px;height:100%">
-                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-secondary);">
-                    <span>ADC ch0</span><span class="pb-text">— / 4095</span>
+            <div style="padding:0 8px;display:flex;flex-direction:column;justify-content:center;gap:6px;height:100%">
+                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-secondary)">
+                    <span class="pb-label">进度</span><span class="pb-text">—</span>
                 </div>
                 <div class="pb-track"><div class="pb-fill" style="width:0%"></div></div>
             </div>`;
         const fill = body.querySelector('.pb-fill');
         const txt  = body.querySelector('.pb-text');
-        el._busUnsub = busOn(0x0C, ({ data, stat }) => {
-            if (stat & 0x10 || data.length < 3 || data[0] !== 0) return;
-            const v = (data[1] << 8) | data[2];
-            fill.style.width   = (v / 4095 * 100).toFixed(1) + '%';
-            txt.textContent    = `${v} / 4095`;
-        });
-        break;
-    }
-
-    case 'statuslight': {
-        body.innerHTML = `
-            <div class="sl-center">
-                <div class="sl-dot"></div>
-                <div class="sl-label">IDLE</div>
-            </div>`;
-        const dot   = body.querySelector('.sl-dot');
-        const label = body.querySelector('.sl-label');
-        el._busUnsub = busOn('*', ({ func, stat }) => {
-            if (stat & 0x80) {
-                dot.className = 'sl-dot sl-err'; label.textContent = 'ERROR';
-            } else if (stat & 0x01) {
-                dot.className = 'sl-dot sl-on';  label.textContent = `0x${func.toString(16).toUpperCase()}`;
-            } else {
-                dot.className = 'sl-dot sl-off'; label.textContent = 'IDLE';
+        widgetAPI.set(el.id, {
+            pushChannel(n, v) {
+                if (n !== 0) return;
+                const pct = Math.min(100, Math.max(0, v));
+                fill.style.width = pct.toFixed(1) + '%';
+                txt.textContent  = pct.toFixed(1) + '%';
             }
         });
         break;
     }
 
-    case 'switch': {
-        body.innerHTML = `
-            <div class="sw-center">
-                <div style="font-size:10px;color:var(--text-secondary);margin-bottom:8px;">LED Control 0x01</div>
-                <div style="display:flex;gap:8px;">
-                    <button class="sw-btn sw-on">ON</button>
-                    <button class="sw-btn sw-off">OFF</button>
-                </div>
-                <div style="margin-top:8px;display:flex;gap:4px;">
-                    <label style="font-size:10px;color:var(--text-dim);"><input type="checkbox" class="sw-led1" checked> LED1</label>
-                    <label style="font-size:10px;color:var(--text-dim);"><input type="checkbox" class="sw-led2" checked> LED2</label>
-                </div>
-            </div>`;
-        const addr   = () => parseInt(document.getElementById('target-addr').value, 16) || 1;
-        const getLed1 = () => body.querySelector('.sw-led1').checked;
-        const getLed2 = () => body.querySelector('.sw-led2').checked;
-        const getMask = () => (getLed1() ? 1 : 0) | (getLed2() ? 2 : 0);
-
-        body.querySelector('.sw-on').addEventListener('click', async () => {
-            const fr = buildFrame(addr(), 0x01, 0x11, [getMask()]);
-            appendFrameLog('tx', new Date(), fr.map(b=>b.toString(16).padStart(2,'0').toUpperCase()).join(' '), 'LED ON');
-            await serialSend(fr);
-        });
-        body.querySelector('.sw-off').addEventListener('click', async () => {
-            const fr = buildFrame(addr(), 0x01, 0x10, []);
-            appendFrameLog('tx', new Date(), fr.map(b=>b.toString(16).padStart(2,'0').toUpperCase()).join(' '), 'LED OFF');
-            await serialSend(fr);
-        });
-        break;
-    }
-
-    case 'slider': {
-        body.innerHTML = `
-            <div style="padding:0 4px;display:flex;flex-direction:column;justify-content:center;gap:8px;height:100%">
-                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-secondary);">
-                    <span>LED Blink interval</span><span class="sl-val-text">500ms</span>
-                </div>
-                <input type="range" min="1" max="10" value="5" class="sl-range">
-            </div>`;
-        const range  = body.querySelector('.sl-range');
-        const valTxt = body.querySelector('.sl-val-text');
-        const addr   = () => parseInt(document.getElementById('target-addr').value, 16) || 1;
-        range.addEventListener('input', () => {
-            valTxt.textContent = (range.value * 100) + 'ms';
-        });
-        range.addEventListener('change', async () => {
-            const mask = 0x03, interval = parseInt(range.value);
-            const fr = buildFrame(addr(), 0x02, 0x11, [mask, interval]);
-            appendFrameLog('tx', new Date(), fr.map(b=>b.toString(16).padStart(2,'0').toUpperCase()).join(' '), 'LED Blink');
-            await serialSend(fr);
+    case 'statuslight': {
+        body.innerHTML = `<div class="sl-center"><div class="sl-dot"></div><div class="sl-label">—</div></div>`;
+        const dot   = body.querySelector('.sl-dot');
+        const label = body.querySelector('.sl-label');
+        widgetAPI.set(el.id, {
+            pushChannel(n, v) {
+                if (n !== 0) return;
+                if (v > 0) { dot.className = 'sl-dot sl-on';  label.textContent = String(v); }
+                else        { dot.className = 'sl-dot sl-off'; label.textContent = '—'; }
+            }
         });
         break;
     }
 
     case 'text': {
-        body.innerHTML = `<div class="text-body">— 无数据 —</div>`;
-        el._busUnsub = busOn(0x20, ({ data, stat }) => {
-            if (stat & 0x10) return;
-            const ascii = String.fromCharCode(...data.filter(b => b >= 0x20 && b < 0x7F));
-            body.querySelector('.text-body').textContent = ascii || `[${data.length}B]`;
+        body.innerHTML = `<div class="text-body" style="padding:8px;word-break:break-all">— 绑定脚本后生效 —</div>`;
+        const tb = body.querySelector('.text-body');
+        widgetAPI.set(el.id, { pushChannel(n, v) { if (n === 0) tb.textContent = String(v); } });
+        break;
+    }
+
+    /* ── Control widgets: send custom frames ── */
+    case 'switch': {
+        body.innerHTML = `
+            <div class="sw-center">
+                <div class="sw-hint" style="font-size:9px;color:var(--text-dim);margin-bottom:6px">在属性面板配置 ON / OFF 帧</div>
+                <div style="display:flex;gap:8px">
+                    <button class="sw-btn sw-on">ON</button>
+                    <button class="sw-btn sw-off">OFF</button>
+                </div>
+            </div>`;
+        function sendCtrl(frameKey) {
+            const cfg  = widgetConfigs.get(el.id) || {};
+            const fc   = cfg[frameKey];
+            if (!fc || fc.func == null) {
+                appendDecodedLog('info', new Date(), '—', 'System', '请先在属性面板配置帧', 'err');
+                return;
+            }
+            const addr = parseInt(document.getElementById('target-addr').value, 16) || 1;
+            const fr   = buildFrame(addr, fc.func, fc.stat ?? (frameKey==='onFrame'?0x11:0x10), fc.data || []);
+            appendFrameLog('tx', new Date(), fr.map(b=>b.toString(16).padStart(2,'0').toUpperCase()).join(' '), 'Widget TX');
+            serialSend(fr);
+        }
+        body.querySelector('.sw-on') .addEventListener('click', () => sendCtrl('onFrame'));
+        body.querySelector('.sw-off').addEventListener('click', () => sendCtrl('offFrame'));
+        break;
+    }
+
+    case 'slider': {
+        body.innerHTML = `
+            <div style="padding:0 8px;display:flex;flex-direction:column;justify-content:center;gap:8px;height:100%">
+                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-secondary)">
+                    <span class="sl-lbl">值</span><span class="sl-val-text">—</span>
+                </div>
+                <input type="range" min="0" max="255" value="128" class="sl-range">
+                <div style="font-size:9px;color:var(--text-dim)">在属性面板配置 ON 帧，Data 用 <b>\${v}</b> 占位</div>
+            </div>`;
+        const range  = body.querySelector('.sl-range');
+        const valTxt = body.querySelector('.sl-val-text');
+        range.addEventListener('input', () => { valTxt.textContent = range.value; });
+        range.addEventListener('change', () => {
+            const cfg  = widgetConfigs.get(el.id) || {};
+            const fc   = cfg.onFrame;
+            if (!fc || fc.func == null) return;
+            const addr = parseInt(document.getElementById('target-addr').value, 16) || 1;
+            /* Replace placeholder ${v} in data with slider value */
+            const rawData = (fc.data || []).map(b => b === 0xFE ? parseInt(range.value) : b);
+            const fr = buildFrame(addr, fc.func, fc.stat ?? 0x11, rawData);
+            appendFrameLog('tx', new Date(), fr.map(b=>b.toString(16).padStart(2,'0').toUpperCase()).join(' '), 'Slider TX');
+            serialSend(fr);
         });
         break;
     }
 
     case 'xy':
     case 'script':
-    default:
-        body.innerHTML = `<div style="color:var(--text-dim);font-size:11px;padding:8px;text-align:center;">${type}</div>`;
+    default: {
+        body.innerHTML = `<div style="color:var(--text-dim);font-size:11px;padding:8px;text-align:center">在属性面板绑定脚本</div>`;
+        const vals = [];
+        widgetAPI.set(el.id, { pushChannel(n, v) { vals[n] = v; } });
+        break;
+    }
     }
 }
 

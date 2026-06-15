@@ -181,6 +181,7 @@
     <div id="left-sep"></div>
 
     <!-- ===== CENTER AREA ===== -->
+
     <div id="center-area">
         <!-- Canvas Toolbar -->
         <div id="canvas-toolbar">
@@ -253,6 +254,19 @@
 
             <button id="btn-manual-send" class="send-btn">↑ 发送</button>
         </div>
+    </div>
+
+    <!-- Right panel resize separator -->
+    <div id="right-sep" style="display:none"></div>
+
+    <!-- ===== RIGHT PANEL (属性面板) ===== -->
+    <div id="right-panel" style="display:none">
+        <div class="rpanel-header">
+            <span class="rpanel-title">属性</span>
+            <span id="rpanel-widget-type" class="rpanel-widget-type"></span>
+            <button id="rpanel-close" class="rpanel-close-btn" title="关闭">✕</button>
+        </div>
+        <div id="rpanel-body" class="rpanel-body"></div>
     </div>
 
 </div><!-- end #main-layout -->
