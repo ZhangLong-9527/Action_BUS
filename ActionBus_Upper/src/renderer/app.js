@@ -1325,6 +1325,8 @@ function initWidgetContent(el, type) {
         body.innerHTML = `<canvas class="wf-canvas" style="width:100%;height:100%;display:block;cursor:grab"></canvas>`;
         const cvs = body.querySelector('.wf-canvas');
         const ctx = cvs.getContext('2d');
+        /* 阻止中键默认的自动滚动光标（Electron / Chromium 均适用） */
+        cvs.addEventListener('auxclick', e => e.preventDefault());
 
         let dirty = false;
         let rafId = null;
@@ -1437,27 +1439,60 @@ function initWidgetContent(el, type) {
             }
         }
 
-        /* Pan: left-button drag */
-        let panActive = false, panStartX = 0, panStartOffset = 0;
+        /* Pan: left-button drag (X + Y)；中键按下复位视图 */
+        let panActive = false;
+        let panStartX = 0, panStartY = 0;
+        let panStartOffset = 0, panStartCenter = 0;
+
         cvs.addEventListener('mousedown', e => {
+            if (e.button === 1) {
+                /* 滚轮中键：复位到最新数据 + 自动 Y 量程 */
+                e.preventDefault();
+                xOffset = 0;
+                yMode   = 'auto';
+                dirty   = true; scheduleDraw();
+                return;
+            }
             if (e.button !== 0) return;
-            panActive = true;
-            panStartX = e.clientX;
+            panActive      = true;
+            panStartX      = e.clientX;
+            panStartY      = e.clientY;
             panStartOffset = xOffset;
+            panStartCenter = yCenter;
+            /* 拖拽 Y 轴时切换为手动模式，保留当前可见中心值 */
+            if (yMode === 'auto') {
+                yMode   = 'manual';
+                yCenter = (lastYLo + lastYHi) / 2;
+                yRange  = lastYHi - lastYLo || 2;
+                panStartCenter = yCenter;
+            }
             cvs.style.cursor = 'grabbing';
             e.preventDefault();
         });
+
         const onPanMove = e => {
             if (!panActive) return;
             const rect = cvs.getBoundingClientRect();
-            const W2 = rect.width - 44 - 8;   /* pad.l=44 pad.r=8 */
-            if (W2 <= 0) return;
-            const delta = Math.round((panStartX - e.clientX) / W2 * xView);
+            const W2 = rect.width  - 44 - 8;    /* pad.l=44 pad.r=8 */
+            const H2 = rect.height - 18 - 18;   /* pad.t=18 pad.b=18 */
+            if (W2 <= 0 || H2 <= 0) return;
+
+            /* X pan */
+            const dxSamples = Math.round((panStartX - e.clientX) / W2 * xView);
             const maxSz = Math.max(...channels.filter(c=>c.active).map(c=>c.ring.size), 2);
-            xOffset = Math.max(0, Math.min(Math.max(0, maxSz - xView), panStartOffset + delta));
+            xOffset = Math.max(0, Math.min(Math.max(0, maxSz - xView), panStartOffset + dxSamples));
+
+            /* Y pan (上移 = 值增大) */
+            const dyValue = (e.clientY - panStartY) / H2 * yRange;
+            yCenter = panStartCenter + dyValue;
+
             dirty = true; scheduleDraw();
         };
-        const onPanUp = e => { if (e.button === 0) { panActive = false; cvs.style.cursor = 'grab'; } };
+
+        const onPanUp = e => {
+            if (e.button === 0) { panActive = false; cvs.style.cursor = 'grab'; }
+        };
+
         document.addEventListener('mousemove', onPanMove);
         document.addEventListener('mouseup',   onPanUp);
         el._panCleanup = () => {
