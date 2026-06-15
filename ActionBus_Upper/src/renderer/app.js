@@ -1477,8 +1477,8 @@ function initWidgetContent(el, type) {
             const H2 = rect.height - 18 - 18;   /* pad.t=18 pad.b=18 */
             if (W2 <= 0 || H2 <= 0) return;
 
-            /* X pan */
-            const dxSamples = Math.round((panStartX - e.clientX) / W2 * xView);
+            /* X pan：向右拖 = 查看更早的历史数据（xOffset 增大） */
+            const dxSamples = Math.round((e.clientX - panStartX) / W2 * xView);
             const maxSz = Math.max(...channels.filter(c=>c.active).map(c=>c.ring.size), 2);
             xOffset = Math.max(0, Math.min(Math.max(0, maxSz - xView), panStartOffset + dxSamples));
 
