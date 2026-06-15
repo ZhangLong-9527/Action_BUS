@@ -1124,7 +1124,44 @@ canvas.addEventListener('mousedown', e => {
 });
 
 /* ── Save / Load layout ── */
-document.getElementById('btn-save-layout').addEventListener('click', () => {
+
+/** 从 widgets 数组恢复画布，清空现有内容 */
+function applyLayoutData(widgets) {
+    canvas.querySelectorAll('.canvas-widget').forEach(w => {
+        if (w._panCleanup) w._panCleanup();
+        widgetConfigs.delete(w.id); widgetAPI.delete(w.id);
+        displayWidgets.delete(w); w.remove();
+    });
+    hideRightPanel();
+    canvasHint.style.display = '';
+    widgets.forEach(wd => {
+        const el = createWidget(wd.type, wd.x, wd.y);
+        if (!el) return;
+        el.style.width  = wd.w + 'px';
+        el.style.height = wd.h + 'px';
+        if (wd.label) {
+            const n = el.querySelector('.widget-titlebar-name');
+            if (n) n.textContent = wd.label;
+        }
+        const conf = {};
+        if (wd.script    !== undefined) {
+            conf.script     = wd.script;
+            conf.compiledFn = compileWidgetScript(wd.script);
+        }
+        if (wd.onFrame   !== undefined) conf.onFrame   = wd.onFrame;
+        if (wd.offFrame  !== undefined) conf.offFrame  = wd.offFrame;
+        if (wd.maxPoints !== undefined) conf.maxPoints = wd.maxPoints;
+        widgetConfigs.set(el.id, conf);
+        if (wd.type === 'waveform' && wd.maxPoints) {
+            const api = widgetAPI.get(el.id);
+            if (api && api.setMaxPoints) api.setMaxPoints(wd.maxPoints);
+        }
+    });
+    if (canvas.querySelector('.canvas-widget')) canvasHint.style.display = 'none';
+}
+
+/** 将当前画布序列化为 JSON 字符串（Function 值由 JSON.stringify 自动忽略） */
+function serializeLayout() {
     const widgets = [];
     canvas.querySelectorAll('.canvas-widget').forEach(w => {
         const cfg  = widgetConfigs.get(w.id) || {};
@@ -1134,10 +1171,19 @@ document.getElementById('btn-save-layout').addEventListener('click', () => {
             x: parseInt(w.style.left), y: parseInt(w.style.top),
             w: w.offsetWidth,          h: w.offsetHeight,
             label: name,
-            ...cfg,
+            script:    cfg.script,
+            onFrame:   cfg.onFrame,
+            offFrame:  cfg.offFrame,
+            maxPoints: cfg.maxPoints,
         });
     });
-    const json = JSON.stringify({ version: 1, widgets }, null, 2);
+    return JSON.stringify({ version: 1, widgets }, null, 2);
+}
+
+document.getElementById('btn-save-layout').addEventListener('click', () => {
+    const json = serializeLayout();
+    /* 同步写入 localStorage，下次启动自动恢复 */
+    try { localStorage.setItem('ab-layout', json); } catch {}
     const blob = new Blob([json], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
     const a    = Object.assign(document.createElement('a'), { href: url, download: 'layout.json' });
@@ -1153,36 +1199,9 @@ document.getElementById('btn-load-layout').addEventListener('click', () => {
         reader.onload = ev => {
             try {
                 const { widgets } = JSON.parse(ev.target.result);
-                canvas.querySelectorAll('.canvas-widget').forEach(w => {
-                    widgetConfigs.delete(w.id); widgetAPI.delete(w.id); w.remove();
-                });
-                hideRightPanel();
-                canvasHint.style.display = '';
-                widgets.forEach(wd => {
-                    const el = createWidget(wd.type, wd.x, wd.y);
-                    if (!el) return;
-                    el.style.width  = wd.w + 'px';
-                    el.style.height = wd.h + 'px';
-                    if (wd.label) {
-                        const n = el.querySelector('.widget-titlebar-name');
-                        if (n) n.textContent = wd.label;
-                    }
-                    const conf = {};
-                    if (wd.script    !== undefined) {
-                        conf.script     = wd.script;
-                        conf.compiledFn = compileWidgetScript(wd.script);
-                    }
-                    if (wd.onFrame   !== undefined) conf.onFrame   = wd.onFrame;
-                    if (wd.offFrame  !== undefined) conf.offFrame  = wd.offFrame;
-                    if (wd.maxPoints !== undefined) conf.maxPoints = wd.maxPoints;
-                    widgetConfigs.set(el.id, conf);
-                    /* Apply maxPoints to waveform ring buffers */
-                    if (wd.type === 'waveform' && wd.maxPoints) {
-                        const api = widgetAPI.get(el.id);
-                        if (api && api.setMaxPoints) api.setMaxPoints(wd.maxPoints);
-                    }
-                });
-                if (canvas.querySelector('.canvas-widget')) canvasHint.style.display = 'none';
+                applyLayoutData(widgets);
+                /* 载入的文件同样更新自动保存记录 */
+                try { localStorage.setItem('ab-layout', ev.target.result); } catch {}
             } catch (e) {
                 appendDecodedLog('info', new Date(), '—', 'System', `布局加载失败: ${e.message}`, 'err');
             }
@@ -1895,4 +1914,15 @@ document.addEventListener('click', e => {
     applyTheme(saved);
     setActiveThemeItem(saved);
     refreshPortList();
+
+    /* 自动恢复上次保存的布局 */
+    const savedLayout = localStorage.getItem('ab-layout');
+    if (savedLayout) {
+        try {
+            const { widgets } = JSON.parse(savedLayout);
+            if (Array.isArray(widgets) && widgets.length > 0) {
+                applyLayoutData(widgets);
+            }
+        } catch {}
+    }
 })();
