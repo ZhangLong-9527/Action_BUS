@@ -33,7 +33,7 @@ function buildFrame(addr, func, stat, data = []) {
     return [0xAA, 0x55, ...body, (crc >> 8) & 0xFF, crc & 0xFF];
 }
 
-/** Known ActionBus function codes */
+/** Known ActionBus function codes — display name */
 const AB_FUNC = {
     0x01: 'LED Control',
     0x02: 'LED Blink',
@@ -46,6 +46,198 @@ const AB_FUNC = {
     0xF0: 'Protocol Query',
     0xFE: 'Action Desc',
 };
+
+/** Function code → widget type to create when user clicks "+" */
+const AB_FUNC_WIDGET = {
+    0x01: 'switch',
+    0x02: 'slider',
+    0x0A: 'waveform',
+    0x0B: 'attitude',
+    0x0C: 'number',
+    0x0D: 'number',
+    0x20: 'text',
+};
+
+/* ============================================================
+   DEVICE REGISTRY + DYNAMIC DEVICE LIST
+   ============================================================ */
+
+/** addr (number) → { addr, name, uptime, cpuTemp, tasks, online } */
+const deviceRegistry = new Map();
+
+/** Pending frame-response promises: `${addr}_${func}` → resolve fn */
+const pendingQueries = {};
+
+function resolveQuery(addr, func, payload) {
+    const key = `${addr}_${func}`;
+    if (pendingQueries[key]) {
+        pendingQueries[key](payload);
+        delete pendingQueries[key];
+    }
+}
+
+function waitForResponse(addr, func, timeoutMs = 600) {
+    return new Promise(resolve => {
+        const key = `${addr}_${func}`;
+        pendingQueries[key] = resolve;
+        setTimeout(() => {
+            if (pendingQueries[key] === resolve) {
+                delete pendingQueries[key];
+                resolve(null);
+            }
+        }, timeoutMs);
+    });
+}
+
+function addrHex(addr) {
+    return '0x' + addr.toString(16).padStart(2, '0').toUpperCase();
+}
+
+function renderDeviceList() {
+    const list = document.getElementById('device-list');
+    if (!list) return;
+
+    if (deviceRegistry.size === 0) {
+        list.innerHTML = '<div class="device-list-empty">暂无设备<br><span>连接串口后点击「刷新」或「One Click Scan」</span></div>';
+        return;
+    }
+
+    list.innerHTML = '';
+    for (const [addr, dev] of deviceRegistry) {
+        const hex     = addrHex(addr);
+        const isOnline = dev.online;
+        const statusCls = dev.pending ? 'pending' : (isOnline ? '' : 'offline');
+        const nodeCls   = isOnline ? '' : ' offline';
+
+        const funcList = Object.entries(AB_FUNC)
+            .filter(([code]) => +code !== 0xF0 && +code !== 0xFE)
+            .map(([code, name]) => {
+                const fc = (+code).toString(16).padStart(2,'0').toUpperCase();
+                return `<div class="action-item" data-addr="${addr}" data-func="${+code}">
+                    <span class="action-code">0x${fc}</span>
+                    <span class="action-name">${name}</span>
+                    <button class="action-add-btn" title="添加到画布">+</button>
+                </div>`;
+            }).join('');
+
+        const upStr = dev.uptime !== undefined
+            ? `uptime ${(dev.uptime / 1000).toFixed(0)}s  cpu ${(dev.cpuTemp / 100).toFixed(1)}°C  tasks ${dev.tasks}`
+            : '';
+
+        const node = document.createElement('div');
+        node.className = `device-node${nodeCls}`;
+        node.dataset.addr = addr;
+        node.innerHTML = `
+            <div class="device-node-header">
+                <span class="device-chevron">▶</span>
+                <span class="device-addr">${hex}</span>
+                <div class="device-info">
+                    <div class="device-name">${dev.name || 'ActionBus Node'}</div>
+                    <div class="device-ver">${upStr || (isOnline ? 'v3.1 · ActionBus' : '离线')}</div>
+                </div>
+                <span class="device-status ${statusCls}"></span>
+            </div>
+            <div class="device-actions">${funcList}</div>`;
+        list.appendChild(node);
+    }
+}
+
+function onDeviceStatusReceived(addr, data) {
+    if (data.length < 8) return;
+    const uptime  = ((data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]) >>> 0;
+    const cpuTemp = s16(data[4], data[5]);
+    const tasks   = data[6];
+    const devAddr = data[7];
+    const existing = deviceRegistry.get(addr) || {};
+    deviceRegistry.set(addr, {
+        ...existing,
+        addr,
+        name:    existing.name || `Node_${addrHex(devAddr)}`,
+        uptime,
+        cpuTemp,
+        tasks,
+        online:  true,
+        pending: false,
+    });
+    renderDeviceList();
+}
+
+async function queryDevice(addr) {
+    if (!connected) return;
+    const existing = deviceRegistry.get(addr) || {};
+    deviceRegistry.set(addr, { ...existing, addr, online: false, pending: true });
+    renderDeviceList();
+
+    const frame = buildFrame(addr, 0x0D, 0x11);
+    const hexStr = frame.map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
+    appendFrameLog('tx', new Date(), hexStr, 'Device Status');
+    await serialSend(frame);
+
+    const resp = await waitForResponse(addr, 0x0D, 700);
+    if (resp) {
+        onDeviceStatusReceived(addr, resp.data);
+    } else {
+        const dev = deviceRegistry.get(addr);
+        if (dev) { dev.online = false; dev.pending = false; }
+        renderDeviceList();
+        appendDecodedLog('info', new Date(), '—', 'System', `${addrHex(addr)} 无响应`, 'err');
+    }
+}
+
+async function scanDevices() {
+    if (!connected) {
+        appendDecodedLog('info', new Date(), '—', 'System', '请先连接串口', 'err');
+        return;
+    }
+    appendDecodedLog('info', new Date(), '—', 'System', '扫描总线 0x01–0x10…', 'val');
+
+    const list = document.getElementById('device-list');
+    list.innerHTML = '<div class="device-scan-row"><div class="scan-spinner"></div>正在扫描 0x01 – 0x10…</div>';
+
+    for (let addr = 0x01; addr <= 0x10; addr++) {
+        const frame  = buildFrame(addr, 0x0D, 0x11);
+        await serialSend(frame);
+        const resp = await waitForResponse(addr, 0x0D, 250);
+        if (resp) onDeviceStatusReceived(addr, resp.data);
+    }
+
+    if (deviceRegistry.size === 0) {
+        renderDeviceList();
+        appendDecodedLog('info', new Date(), '—', 'System', '未发现设备', 'err');
+    } else {
+        renderDeviceList();
+        appendDecodedLog('info', new Date(), '—', 'System', `发现 ${deviceRegistry.size} 台设备`, 'ok');
+    }
+}
+
+/* Event delegation on device list — expand/collapse + "+" button */
+document.getElementById('device-list').addEventListener('click', e => {
+    /* "+" button → add widget to canvas */
+    const addBtn = e.target.closest('.action-add-btn');
+    if (addBtn) {
+        const item    = addBtn.closest('.action-item');
+        const func    = parseInt(item.dataset.func, 10);
+        const addr    = parseInt(item.dataset.addr, 10);
+        const type    = AB_FUNC_WIDGET[func] || 'number';
+        const taken   = canvas.querySelectorAll('.canvas-widget').length;
+        const col     = taken % 3, row = Math.floor(taken / 3);
+        const x = 24 + col * 300, y = 24 + row * 180;
+        const w = createWidget(type, x, y);
+        if (w) {
+            w.dataset.boundFunc = func;
+            w.dataset.boundAddr = addr;
+            const nameEl = w.querySelector('.widget-titlebar-name');
+            if (nameEl) nameEl.textContent = `${AB_FUNC[func] || '0x' + func.toString(16)} · ${addrHex(addr)}`;
+        }
+        return;
+    }
+
+    /* Header click → expand/collapse */
+    const header = e.target.closest('.device-node-header');
+    if (header) {
+        header.closest('.device-node').classList.toggle('expanded');
+    }
+});
 
 function s16(hi, lo) {
     const v = ((hi & 0xFF) << 8) | (lo & 0xFF);
@@ -217,6 +409,9 @@ function setConnected(val) {
         text.textContent = 'DISCONNECTED';
         btn.textContent  = 'Connect';
         btn.classList.replace('danger', 'primary');
+        /* Mark all devices offline */
+        for (const dev of deviceRegistry.values()) { dev.online = false; dev.pending = false; }
+        renderDeviceList();
         rxBuffer.length = 0;
     }
 }
@@ -290,6 +485,9 @@ function processRxBuffer() {
             `0x${func.toString(16).padStart(2,'0').toUpperCase()}`,
             name, decoded.text, decoded.status);
 
+        /* Resolve any pending await-response query */
+        resolveQuery(addr, func, { addr, func, stat, data });
+
         /* Notify canvas widgets */
         busEmit(func, { func, stat, addr, data });
     }
@@ -317,25 +515,14 @@ document.getElementById('btn-connect').addEventListener('click', () => {
 });
 
 /* ============================================================
-   ONE-CLICK SCAN
+   ONE-CLICK SCAN  (titlebar) + REFRESH (sidebar)
    ============================================================ */
-document.getElementById('btn-scan').addEventListener('click', async () => {
+document.getElementById('btn-scan').addEventListener('click', () => scanDevices());
+
+document.getElementById('btn-refresh-devices').addEventListener('click', () => {
     if (!connected) { appendDecodedLog('info', new Date(), '—', 'System', '请先连接串口', 'err'); return; }
     const addr = parseInt(document.getElementById('target-addr').value.trim(), 16) || 0x01;
-    appendDecodedLog('info', new Date(), '—', 'System', `扫描设备 0x${addr.toString(16).padStart(2,'0')}…`, 'val');
-
-    /* GET_PROTOCOL_VERSION */
-    const vFrame = buildFrame(addr, 0xF0, 0x11, [0x00]);
-    const hexV   = vFrame.map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
-    appendFrameLog('tx', new Date(), hexV, 'GET_PROTOCOL_VERSION');
-    await serialSend(vFrame);
-
-    /* GET_ACTION_COUNT */
-    await new Promise(r => setTimeout(r, 60));
-    const cFrame = buildFrame(addr, 0xF0, 0x11, [0x02]);
-    const hexC   = cFrame.map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
-    appendFrameLog('tx', new Date(), hexC, 'GET_ACTION_COUNT');
-    await serialSend(cFrame);
+    queryDevice(addr);
 });
 
 /* ============================================================
@@ -529,10 +716,6 @@ document.querySelectorAll('.panel-tab').forEach(tab => {
     });
 });
 
-/* Device node expand */
-document.querySelectorAll('.device-node-header').forEach(h => {
-    h.addEventListener('click', () => h.closest('.device-node').classList.toggle('expanded'));
-});
 
 /* ============================================================
    BOTTOM PANEL — drag resize
@@ -601,13 +784,6 @@ canvas.addEventListener('drop', e => {
     dragWidgetType = null;
 });
 
-/* Action "+" adds widget */
-document.querySelectorAll('.action-add-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        const rect = canvas.getBoundingClientRect();
-        createWidget('waveform', 24, 24);
-    });
-});
 
 /* ── Widget factory ─────────────────────────────────────── */
 function createWidget(type, x, y) {

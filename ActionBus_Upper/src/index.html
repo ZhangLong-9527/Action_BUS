@@ -104,62 +104,10 @@
             <div id="devices-tab">
                 <div class="device-tree-header">
                     <span class="device-tree-title">当前总线设备</span>
-                    <button class="tb-btn" style="height:20px;font-size:10px;padding:0 6px;" id="btn-refresh-devices">刷新</button>
+                    <button class="tb-btn device-refresh-btn" id="btn-refresh-devices">刷新</button>
                 </div>
-
-                <!-- Device Node: 0x01 -->
-                <div class="device-node expanded">
-                    <div class="device-node-header">
-                        <span class="device-chevron">▶</span>
-                        <span class="device-addr">0x01</span>
-                        <div class="device-info">
-                            <div class="device-name">SensorNode_A</div>
-                            <div class="device-ver">v3.0 · ActionBus</div>
-                        </div>
-                        <span class="device-status"></span>
-                    </div>
-                    <div class="device-actions">
-                        <div class="action-item">
-                            <span class="action-code">0x0B</span>
-                            <span class="action-name">Temperature Read</span>
-                            <button class="action-add-btn" title="添加到画布">+</button>
-                        </div>
-                        <div class="action-item">
-                            <span class="action-code">0x02</span>
-                            <span class="action-name">History Read</span>
-                            <button class="action-add-btn" title="添加到画布">+</button>
-                        </div>
-                        <div class="action-item">
-                            <span class="action-code">0x10</span>
-                            <span class="action-name">Firmware Update (File Transfer)</span>
-                            <button class="action-add-btn" title="添加到画布">+</button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Device Node: 0x05 -->
-                <div class="device-node">
-                    <div class="device-node-header">
-                        <span class="device-chevron">▶</span>
-                        <span class="device-addr">0x05</span>
-                        <div class="device-info">
-                            <div class="device-name">MotorController_B</div>
-                            <div class="device-ver">v3.0 · ActionBus</div>
-                        </div>
-                        <span class="device-status"></span>
-                    </div>
-                    <div class="device-actions">
-                        <div class="action-item">
-                            <span class="action-code">0x0A</span>
-                            <span class="action-name">Motor Speed Control</span>
-                            <button class="action-add-btn" title="添加到画布">+</button>
-                        </div>
-                        <div class="action-item">
-                            <span class="action-code">0x0C</span>
-                            <span class="action-name">IMU Attitude</span>
-                            <button class="action-add-btn" title="添加到画布">+</button>
-                        </div>
-                    </div>
+                <div id="device-list">
+                    <div class="device-list-empty">暂无设备<br><span>连接串口后点击「刷新」或「One Click Scan」</span></div>
                 </div>
             </div>
         </div>

@@ -275,7 +275,8 @@ uint8_t ActionBus_Send_Frame(uint8_t func_code, uint8_t stat,
         g_tx_buf[idx++] = data[i];
     }
 
-    uint16_t crc = ActionBus_CRC16(g_tx_buf, idx);
+    /* CRC 覆盖范围：从 Addr 到最后一个数据字节（不含 AA 55 帧头） */
+    uint16_t crc = ActionBus_CRC16(g_tx_buf + 2, idx - 2);
     g_tx_buf[idx++] = (uint8_t)(crc >> 8);
     g_tx_buf[idx++] = (uint8_t)(crc & 0xFF);
 
@@ -391,7 +392,8 @@ void ActionBus_RxHandler(uint8_t byte)
             g_rx_data_idx++;
 
             {
-                uint16_t calc_crc = ActionBus_CRC16(g_rx_frame.raw, 6 + g_rx_frame.len);
+                /* CRC 覆盖范围：raw[2..] 即从 Addr 开始，不含 AA 55 帧头 */
+                uint16_t calc_crc = ActionBus_CRC16(g_rx_frame.raw + 2, 4 + g_rx_frame.len);
                 if (g_rx_crc == calc_crc) {
                     g_rx_frame.crc = g_rx_crc;   /* 修复：将接收到的 CRC 写回帧结构 */
                     g_frame_ready = 1;

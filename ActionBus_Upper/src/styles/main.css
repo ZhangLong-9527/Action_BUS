@@ -377,6 +377,55 @@ body {
     background: var(--green);
     flex-shrink: 0;
 }
+.device-status.offline  { background: var(--text-dim); }
+.device-status.pending  {
+    background: var(--yellow);
+    animation: pulse-dot .8s ease-in-out infinite alternate;
+}
+@keyframes pulse-dot {
+    from { opacity: 1; }
+    to   { opacity: .3; }
+}
+
+/* Device list empty / scan progress */
+.device-list-empty {
+    padding: 20px 12px;
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+.device-list-empty span { color: var(--text-dim); font-size: 10px; }
+
+.device-scan-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+}
+.scan-spinner {
+    width: 8px;
+    height: 8px;
+    border: 1.5px solid var(--text-dim);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+    flex-shrink: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.device-refresh-btn {
+    height: 20px;
+    font-size: 10px;
+    padding: 0 6px;
+}
+
+.device-node-header .device-name { color: var(--text-primary); }
+.device-node.offline .device-name { color: var(--text-secondary); }
+.device-node.offline .device-addr { opacity: .5; }
 
 .device-actions {
     display: none;

@@ -172,6 +172,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
+/* UART 错误回调：清除 ORE/FE/NE 等错误并重新挂起中断，防止 RX 永久停止 */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1) {
+        HAL_UART_Receive_IT(&huart1, &g_rx_byte, 1);
+    }
+}
+
 /* USER CODE END 4 */
 
 /**
